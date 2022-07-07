@@ -12,14 +12,14 @@ quit(){
 
 }
 git_current_branch () {
-	_ref=$(__git_prompt_git symbolic-ref --quiet HEAD 2> /dev/null)
+	_ref=$(git symbolic-ref --quiet HEAD 2> /dev/null)
 	_ret=$?
 	if [ $_ret != 0 ]
 	then
 		[ $_ret = 128 ] && return
-		ref=$(__git_prompt_git rev-parse --short HEAD 2> /dev/null)  || return
+		_ref=$(git rev-parse --short HEAD 2> /dev/null)  || return
 	fi
-	echo "${ref#refs/heads/}"
+	echo "${_ref#refs/heads/}"
 }
 
 branch_is_master_or_main(){

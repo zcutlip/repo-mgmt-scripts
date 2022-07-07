@@ -29,7 +29,7 @@ if ! version_is_tagged "$version";
 then
     echo "Current version $version isn't tagged."
     echo "Attempting to tag..."
-    "$DIRNAME"/tag.sh || quit "Failed to tag a release." 1
+    "$DIRNAME"/tag || quit "Failed to tag a release." 1
 fi
 
 generate_dist(){

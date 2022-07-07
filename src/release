@@ -45,6 +45,6 @@ ls -1 dist/"$DISTRIBUTION_NAME"-"$version".*
 # shellcheck disable=SC2119
 if prompt_yes_no;
 then
-    python3 -m twine upload dist/"$DISTRIBUTION_NAME"-"$version"*
+    python3 -m twine upload -u "__token__" dist/"$DISTRIBUTION_NAME"-"$version"*
 fi
 

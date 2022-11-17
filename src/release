@@ -6,10 +6,9 @@ DIRNAME="$(dirname "$0")"
 
 
 
-# set DISTRIBUTION_NAME variable
-. "$DIRNAME"/projectname.sh || quit "Create $DIRNAME/projectname.sh with DISTRIBUTION_NAME set" 1
-
-[ -z "$DISTRIBUTION_NAME" ] && quit "Create $DIRNAME/projectname.sh with DISTRIBUTION_NAME set" 1
+# set src & bdist name variables
+SRC_DISTRIBUTION_NAME="$(python3 setup.py --name)"
+BDIST_NAME="$(echo "$SRC_DISTRIBUTION_NAME" | tr '\- ' _)"
 
 
 if ! branch_is_master_or_main;
@@ -40,11 +39,11 @@ version=$(current_version);
 
 generate_dist;
 echo "About to post the following distribution files to pypi.org."
-ls -1 dist/"$DISTRIBUTION_NAME"-"$version".*
+ls -1 dist/"$SRC_DISTRIBUTION_NAME"-"$version".* dist/"$BDIST_NAME"-"$version"*
 
 # shellcheck disable=SC2119
 if prompt_yes_no;
 then
-    python3 -m twine upload -u "__token__" dist/"$DISTRIBUTION_NAME"-"$version"*
+    python3 -m twine upload -u "__token__" dist/"$SRC_DISTRIBUTION_NAME"-"$version".* dist/"$BDIST_NAME"-"$version"*
 fi
 

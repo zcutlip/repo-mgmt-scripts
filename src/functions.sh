@@ -62,10 +62,10 @@ version_is_tagged(){
 
 prompt_yes_no(){
 
-    prompt_string=""
+    prompt_string="[Y/n]"
     if [ -n "$1" ];
     then
-        prompt_string="$1";
+        prompt_string="$1 $prompt_string";
     fi
     echo "$prompt_string"
     read -r response

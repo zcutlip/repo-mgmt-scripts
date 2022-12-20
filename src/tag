@@ -2,13 +2,26 @@
 
 . "$(dirname "$0")"/functions.sh
 
-if ! branch_is_master_or_main;
+if [ $# -ge 1 ];
+then
+    #optionally allow tagging from a specified branch rather than master/main
+    check_branch="$1"
+    shift
+fi
+
+if [ -n "$check_branch" ] && ! branch_is "$check_branch";
+then
+    _cur_branch="$(git_current_branch)"
+    quit "Attempting to tag from branch $_cur_branch, not $check_branch. Check out $check_branch first." 1
+    exit 1
+fi
+
+
+if [ -z "$check_branch" ] && ! branch_is_master_or_main;
 then
     _cur_branch="$(git_current_branch)"
     quit "Attempting to tag from branch $_cur_branch. Check out 'main' or 'master' first." 1
 fi
-
-
 
 if ! branch_is_clean;
 then

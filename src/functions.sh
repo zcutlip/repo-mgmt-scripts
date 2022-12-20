@@ -22,9 +22,19 @@ git_current_branch () {
 	echo "${_ref#refs/heads/}"
 }
 
-branch_is_master_or_main(){
+branch_is(){
+    _expected_branch="$1"
     _branch=$(git_current_branch)
-    if [ "$_branch" = "master" ] || [ "$_branch" = "main" ];
+    if [ "$_branch" = "$_expected_branch" ];
+    then
+        return $SUCCESS;
+    else
+        return $FAILURE;
+    fi
+}
+
+branch_is_master_or_main(){
+    if branch_is "master" || branch_is "main";
     then
         return $SUCCESS;
     else

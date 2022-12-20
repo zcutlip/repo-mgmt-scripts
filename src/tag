@@ -36,7 +36,7 @@ version=$(current_version) || quit $?;
 if version_is_tagged "$version";
 then
     echo "Version $version already tagged."
-    git tag -l
+    git --no-pager tag -l
     quit 0
 fi
 
@@ -45,6 +45,6 @@ echo "Tagging version: $version"
 git tag -a "v$version" -m "version $version" || quit "Failed to tag $version" $?
 
 echo "Tags:"
-git tag -l
+git --no-pager tag -l
 
 quit "Done." 0

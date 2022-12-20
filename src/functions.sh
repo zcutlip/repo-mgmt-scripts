@@ -61,7 +61,7 @@ version_is_tagged(){
     _version="$1"
     # e.g., verion = 0.1.0
     # check if git tag -l v0.1.0 exists
-    tag_description=$(git tag -l v"$_version")
+    tag_description=$(git --no-pager tag -l v"$_version")
     if [ -n "$tag_description" ];
     then
         return $SUCCESS;

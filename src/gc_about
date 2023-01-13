@@ -1,0 +1,14 @@
+#!/bin/sh -e
+DIRNAME="$(dirname "$0")"
+
+# utility functions
+. "$DIRNAME"/functions.sh
+
+proj_name="$(project_name)"
+proj_ver="$(current_version)"
+if [ -f "$proj_name"/__about__.py ];
+then
+    git commit -m "bump version to $proj_ver" "$proj_name"/__about__.py
+else
+    quit "No '$proj_name/__about__.py' found to commit" 1
+fi

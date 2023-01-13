@@ -2,6 +2,12 @@
 SUCCESS=0
 FAILURE=1
 
+project_name(){
+    _name="$(python3 setup.py --name)" || quit "Can't determine project name" 1
+    echo "$_name"
+    unset _name
+}
+
 quit(){
     if [ $# -gt 1 ];
     then
@@ -11,6 +17,7 @@ quit(){
     exit "$1"
 
 }
+
 git_current_branch () {
 	_ref=$(git symbolic-ref --quiet HEAD 2> /dev/null)
 	_ret=$?

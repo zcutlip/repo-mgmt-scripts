@@ -1,0 +1,13 @@
+#!/bin/sh -e
+DIRNAME="$(dirname "$0")"
+
+# utility functions
+. "$DIRNAME"/functions.sh
+
+proj_ver="$(current_version)"
+if [ -f CHANGELOG.md ];
+then
+    git commit -m "update CHANGELOG.md for $proj_ver" CHANGELOG.md
+else
+    quit "No 'CHANGELOG.md' found to commit" 1
+fi

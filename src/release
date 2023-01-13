@@ -7,7 +7,7 @@ DIRNAME="$(dirname "$0")"
 
 
 # set src & bdist name variables
-SRC_DISTRIBUTION_NAME="$(python3 setup.py --name)"
+SRC_DISTRIBUTION_NAME="$(project_name)"
 BDIST_NAME="$(echo "$SRC_DISTRIBUTION_NAME" | tr '\- ' _)"
 
 

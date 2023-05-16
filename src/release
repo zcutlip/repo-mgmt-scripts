@@ -44,5 +44,11 @@ ls -1 dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$versi
 # shellcheck disable=SC2119
 if prompt_yes_no;
 then
-    python3 -m twine upload -u "__token__" dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$version"-py*whl
+    # if TWINE_UPLOAD_ENABLED was set in project_settings.sh, it must be set to "1"
+    if [ -z "$TWINE_UPLOAD_ENABLED" ] || [ "$TWINE_UPLOAD_ENABLED" = "1" ];
+    then
+        python3 -m twine upload -u "__token__" dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$version"-py*whl
+    else
+        echo "twine upload to PyPI not enabled. Skipping."
+    fi
 fi

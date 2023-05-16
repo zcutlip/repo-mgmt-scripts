@@ -2,6 +2,17 @@
 SUCCESS=0
 FAILURE=1
 
+if [ -z "$DIRNAME" ];
+then
+    DIRNAME="$(dirname "$0")"
+fi
+
+if [ -f "$DIRNAME/project_settings.sh" ];
+then
+    # shellcheck disable=SC1091
+    . "$DIRNAME/project_settings.sh"
+fi
+
 project_name(){
     _name="$(python3 setup.py --name)" || quit "Can't determine project name" 1
     echo "$_name"

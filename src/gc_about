@@ -4,11 +4,21 @@ DIRNAME="$(dirname "$0")"
 # utility functions
 . "$DIRNAME"/functions.sh
 
-proj_name="$(project_name)"
-proj_ver="$(current_version)"
-if [ -f "$proj_name"/__about__.py ];
+
+# if a python project's top-level package
+# is named differently from the project name
+# override it in project_settings.sh
+if [ -n "$ROOT_PACKAGE_NAME" ];
 then
-    git commit -m "bump version to $proj_ver" "$proj_name"/__about__.py
+    package_name="$ROOT_PACKAGE_NAME"
 else
-    quit "No '$proj_name/__about__.py' found to commit" 1
+    package_name="$(project_name)"
+fi
+
+proj_ver="$(current_version)"
+if [ -f "$package_name"/__about__.py ];
+then
+    git commit -m "bump version to $proj_ver" "$package_name"/__about__.py
+else
+    quit "No '$package_name/__about__.py' found to commit" 1
 fi

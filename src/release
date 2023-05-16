@@ -35,20 +35,21 @@ generate_dist(){
     python3 -m build || quit "Failed to generate source & binary distributions." 1
 }
 
-version=$(current_version);
-
-generate_dist;
-echo "About to post the following distribution files to pypi.org."
-ls -1 dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$version"-py*whl
-
-# shellcheck disable=SC2119
-if prompt_yes_no;
+# if TWINE_UPLOAD_ENABLED was set in project_settings.sh, it must be set to "1"
+if [ -z "$TWINE_UPLOAD_ENABLED" ] || [ "$TWINE_UPLOAD_ENABLED" = "1" ];
 then
-    # if TWINE_UPLOAD_ENABLED was set in project_settings.sh, it must be set to "1"
-    if [ -z "$TWINE_UPLOAD_ENABLED" ] || [ "$TWINE_UPLOAD_ENABLED" = "1" ];
+    version=$(current_version);
+
+    generate_dist;
+    echo "About to post the following distribution files to pypi.org."
+    ls -1 dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$version"-py*whl
+
+    # shellcheck disable=SC2119
+    if prompt_yes_no;
     then
+
         python3 -m twine upload -u "__token__" dist/"$SRC_DISTRIBUTION_NAME"-"$version".tar.gz dist/"$BDIST_NAME"-"$version"-py*whl
-    else
-        echo "twine upload to PyPI not enabled. Skipping."
     fi
+else
+        echo "twine upload to PyPI not enabled. Skipping."
 fi

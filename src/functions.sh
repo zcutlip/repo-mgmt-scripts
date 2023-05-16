@@ -14,7 +14,14 @@ then
 fi
 
 project_name(){
-    _name="$(python3 setup.py --name)" || quit "Can't determine project name" 1
+    # you may override `python3 setup.py --name` by setting
+    # DISTRIBUTION_NAME in project_settings.sh
+    if [ -n "$DISTRIBUTION_NAME" ];
+    then
+        _name="$DISTRIBUTION_NAME"
+    else
+        _name="$(python3 setup.py --name)" || quit "Can't determine project name" 1
+    fi
     echo "$_name"
     unset _name
 }

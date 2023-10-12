@@ -13,7 +13,6 @@ if [ -n "$check_branch" ] && ! branch_is "$check_branch";
 then
     _cur_branch="$(git_current_branch)"
     quit "Attempting to tag from branch $_cur_branch, not $check_branch. Check out $check_branch first." 1
-    exit 1
 fi
 
 

@@ -44,7 +44,12 @@ if ! version_is_tagged "$version";
 then
     echo "Current version $version isn't tagged."
     echo "Attempting to tag..."
-    "$DIRNAME"/tag || quit "Failed to tag a release." 1
+    if [ -n "$check_branch" ];
+    then
+        "$DIRNAME"/tag "$check_branch" || quit "Failed to tag a release." 1
+    else
+        "$DIRNAME"/tag || quit "Failed to tag a release." 1
+    fi
 fi
 
 generate_dist(){

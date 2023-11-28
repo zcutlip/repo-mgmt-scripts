@@ -41,7 +41,9 @@ fi
 
 echo "Tagging version: $version"
 
-git tag -a "v$version" -m "version $version" || quit "Failed to tag $version" $?
+# normally git tag -a is implied if we specify -m
+# if tag.forceSignAnnotated = true, then -s is implied instead
+git tag  "v$version" -m "version $version" || quit "Failed to tag $version" $?
 
 echo "Tags:"
 git --no-pager tag -l

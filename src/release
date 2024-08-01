@@ -14,11 +14,10 @@ DIRNAME="$(dirname "$0")"
 . "$DIRNAME"/functions.sh
 
 
-
-# set src & bdist name variables
-SRC_DISTRIBUTION_NAME="$(project_name)"
-BDIST_NAME="$(echo "$SRC_DISTRIBUTION_NAME" | tr '\- ' _)"
-
+# src distribution is all lower case, and has underscores only
+SRC_DISTRIBUTION_NAME="$(project_name | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+# wheel name replaces dashes with underscores, but is not necessarily lower case
+BDIST_NAME="$(project_name | tr '\- ' _)"
 
 if [ -n "$check_branch" ] && ! branch_is "$check_branch";
 then

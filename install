@@ -1,0 +1,35 @@
+#!/bin/sh
+
+install_dir="$1"
+install_dir="$(realpath -q "$install_dir")"
+
+get_gnu_ln(){
+    _ln=""
+    if command ln --help 2>&1 | grep -q "GNU";
+    then
+        _ln="$(command -v ln)"
+    elif command gln --help 2>&1 | grep -q "GNU";
+    then
+        _ln="$(command -v gln)"
+    fi
+    printf "%s" "$_ln"
+}
+
+LN="$(get_gnu_ln)"
+
+if [ -z "$install_dir" ];
+then
+    echo "Need an installation destination"
+fi
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+src_dir="$script_dir/src"
+echo "script_dir: $script_dir"
+echo "install_dir: $install_dir"
+echo "GNU ln: $LN"
+
+for file in deletebranch functions.sh gc_about gc_changelog release tag;
+do
+    "$LN" -r -s "$src_dir/$file" "$install_dir/"
+done
+cp "$src_dir/example_project_settings.sh" "$install_dir/project_settings.sh"

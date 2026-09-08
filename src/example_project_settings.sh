@@ -3,10 +3,14 @@
 # the symlinks/copies of these repo management scripts, and renamed to project_settings.sh
 # e.g., project/scripts/project_settings.sh
 
-# if python3 ./setup.py --name produces the wrong PyPI distribution name
-# you maybe override it, setting the proper name here
+# resolution order for the distribution name is:
+# DISTRIBUTION_NAME, then static [project] name from pyproject.toml,
+# then `python3 ./setup.py --name`. Set DISTRIBUTION_NAME only when those
+# produce the wrong PyPI distribution name
 # DISTRIBUTION_NAME="repo-mgmt-scripts"
 
+# version resolution prefers <package>/__about__.py (via stdlib ast),
+# falling back to `python3 ./setup.py --version`.
 # for python projects, if the root package is named differently
 # than the project/distribution name, override that here
 # e.g., mock-op vs mock_op

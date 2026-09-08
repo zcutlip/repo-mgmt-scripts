@@ -14,12 +14,22 @@ then
 fi
 
 project_name(){
-    # you may override `python3 setup.py --name` by setting
-    # DISTRIBUTION_NAME in project_settings.sh
+    # resolution order:
+    # 1. DISTRIBUTION_NAME set in project_settings.sh (explicit override)
+    # 2. static [project] name from pyproject.toml (stdlib tomllib, no setuptools)
+    # 3. legacy `python3 setup.py --name` fallback
+    _name=""
     if [ -n "$DISTRIBUTION_NAME" ];
     then
         _name="$DISTRIBUTION_NAME"
-    else
+    elif [ -f "pyproject.toml" ];
+    then
+        _name="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb")).get("project", {}).get("name", ""))' 2>/dev/null)"
+    fi
+    if [ -z "$_name" ];
+    then
+        # DISTRIBUTION_NAME and pyproject.toml both failed to set the name. fall back to
+        # legacy setup.py
         _name="$(python3 setup.py --name)" || quit "Can't determine project name" 1
     fi
     echo "$_name"
@@ -78,8 +88,24 @@ branch_is_clean(){
 }
 
 current_version() {
-    _version="$(python3 ./setup.py --version)" || quit "Unable to detect package version" $?
+    # resolution order:
+    # 1. <package>/__about__.py __version__ via stdlib ast (no import, no
+    #    setuptools). Package dir is ROOT_PACKAGE_NAME when set, else the
+    #    distribution name with dashes mapped to underscores.
+    # 2. legacy `python3 ./setup.py --version` fallback.
+    _pkg="$ROOT_PACKAGE_NAME"
+    if [ -z "$_pkg" ];
+    then
+        _pkg="$(project_name | tr '-' '_')" || quit "Can't determine project name" $?
+    fi
+    if [ -f "$_pkg/__about__.py" ];
+    then
+        _version="$(python3 "$DIRNAME/read_about_version.py" "$_pkg/__about__.py")" || quit "Unable to read version from $_pkg/__about__.py" $?
+    else
+        _version="$(python3 ./setup.py --version)" || quit "Unable to detect package version" $?
+    fi
     printf "%s" "$_version"
+    unset _pkg _version
 }
 
 version_is_tagged(){

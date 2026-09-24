@@ -1,0 +1,600 @@
+#!/bin/sh
+# shellcheck disable=SC2329  # test functions are invoked indirectly by the runner
+#
+# Tests for src/issue-branch.
+#
+# Shell-only harness: builds a throwaway project in a temp directory, copies
+# the scripts under test next to a project_settings.sh, and drives the
+# lifecycle command through its branches. No external test framework.
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SRC_DIR="$REPO_ROOT/src"
+ISSUE_BRANCH="$SRC_DIR/issue-branch"
+
+PASS=0
+FAIL=0
+FAILED_NAMES=""
+
+# ---------------------------------------------------------------------------
+# assertions
+# ---------------------------------------------------------------------------
+
+fail() {
+    _name="$1"
+    _detail="$2"
+    printf 'FAIL: %s\n  %s\n' "$_name" "$_detail"
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES
+  $_name"
+}
+
+pass() {
+    PASS=$((PASS + 1))
+}
+
+assert_status() {
+    _name="$1"
+    _expected="$2"
+    _actual="$3"
+    if [ "$_expected" = "$_actual" ]; then
+        pass
+    else
+        fail "$_name" "expected exit $_expected, got $_actual"
+    fi
+}
+
+assert_eq() {
+    _name="$1"
+    _expected="$2"
+    _actual="$3"
+    if [ "$_expected" = "$_actual" ]; then
+        pass
+    else
+        fail "$_name" "expected '$_expected', got '$_actual'"
+    fi
+}
+
+assert_contains() {
+    _name="$1"
+    _needle="$2"
+    _haystack="$3"
+    case "$_haystack" in
+        *"$_needle"*) pass ;;
+        *) fail "$_name" "expected output to contain '$_needle'; got: $_haystack" ;;
+    esac
+}
+
+assert_branch() {
+    _name="$1"
+    _expected="$2"
+    _actual="$(git branch --show-current 2>/dev/null)"
+    assert_eq "$_name" "$_expected" "$_actual"
+}
+
+assert_executable() {
+    _name="$1"
+    _path="$2"
+    if [ -x "$_path" ]; then
+        pass
+    else
+        fail "$_name" "expected executable to exist: $_path"
+    fi
+}
+
+assert_annotated_tag() {
+    _name="$1"
+    _dir="$2"
+    _tag="$3"
+    _type="$(cd "$_dir" && git cat-file -t "$_tag" 2>/dev/null)"
+    assert_eq "$_name" "tag" "$_type"
+}
+
+assert_absent_tag() {
+    _name="$1"
+    _dir="$2"
+    _tag="$3"
+    _actual="$(cd "$_dir" && git tag -l "$_tag")"
+    assert_eq "$_name" "" "$_actual"
+}
+
+assert_version() {
+    _name="$1"
+    _dir="$2"
+    _expected="$3"
+    _actual="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$_dir/sample/__about__.py")"
+    assert_eq "$_name" "$_expected" "$_actual"
+}
+
+current_version_of() {
+    sed -n 's/^__version__ = "\(.*\)"/\1/p' "$1/sample/__about__.py"
+}
+
+# ---------------------------------------------------------------------------
+# fixture
+# ---------------------------------------------------------------------------
+
+# make_project <dir>
+#
+# Creates a git repo at <dir> with:
+#   pyproject.toml, README.md
+#   sample/__about__.py           (__version__ = "1.3.0")
+#   CHANGELOG.md                  (non-empty [Unreleased])
+#   scripts/issue-branch-*        (scripts under test)
+#   scripts/run-tests.sh          (overridable by the test)
+#   scripts/project_settings.sh   (test project settings)
+make_project() {
+    _dir="$1"
+    mkdir -p "$_dir/sample" "$_dir/scripts"
+
+    cat > "$_dir/pyproject.toml" <<'EOF'
+[project]
+name = "sample-project"
+dynamic = ["version"]
+EOF
+
+    cat > "$_dir/sample/__about__.py" <<'EOF'
+__version__ = "1.3.0"
+EOF
+
+    cat > "$_dir/README.md" <<'EOF'
+# sample project
+EOF
+
+    cat > "$_dir/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+### Added
+
+- Something new.
+
+## [1.3.0] - 2026-09-17
+
+### Added
+
+- Previous release.
+EOF
+
+    cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"
+    cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"
+    cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"
+    chmod +x "$_dir/scripts/issue-branch"
+
+    cat > "$_dir/scripts/run-tests.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$_dir/scripts/run-tests.sh"
+
+    cat > "$_dir/scripts/project_settings.sh" <<'EOF'
+ROOT_PACKAGE_NAME="sample"
+ISSUE_BRANCH_TEMPLATE="dev/{issue}-{slug}"
+ISSUE_BRANCH_BASE="main"
+ISSUE_BRANCH_TEST_COMMAND="scripts/run-tests.sh"
+ISSUE_BRANCH_CHANGELOG="CHANGELOG.md"
+TWINE_UPLOAD_ENABLED="0"
+EOF
+
+    (
+        cd "$_dir" || exit 1
+        git init -q -b main
+        git config user.email "test@example.com"
+        git config user.name "Test"
+        git add -A
+        git commit -qm "initial commit"
+    )
+}
+
+# run_in <dir> <args...>  -> exit status in RUN_STATUS
+run_in() {
+    _dir="$1"
+    shift
+    RUN_OUT="$(cd "$_dir" && ./scripts/issue-branch "$@" 2>&1)"
+    RUN_STATUS=$?
+    # shellcheck disable=SC2034  # captured for failure-message context
+    LAST_OUT="$RUN_OUT"
+}
+
+# ---------------------------------------------------------------------------
+# temp workspace
+# ---------------------------------------------------------------------------
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/issue-branch-test.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# preconditions
+# ---------------------------------------------------------------------------
+
+# The command under test is the deliverable; when it is absent, every test
+# fails. Report each test independently instead of aborting the run so RED
+# shows the full contract surface.
+COMMAND_PRESENT=1
+if [ ! -x "$ISSUE_BRANCH" ]; then
+    COMMAND_PRESENT=0
+fi
+
+# run_test <fn>
+#
+# Returns immediately when the command under test is absent, recording an
+# explicit failure for the test instead of running it against a missing
+# executable.
+run_test() {
+    _fn="$1"
+    if [ "$COMMAND_PRESENT" -eq 0 ]; then
+        fail "$_fn" "src/issue-branch is missing; contract cannot be exercised"
+        return
+    fi
+    "$_fn"
+}
+
+# ---------------------------------------------------------------------------
+# create
+# ---------------------------------------------------------------------------
+
+test_create_uses_project_template_and_commits_dev_version() {
+    make_project "$WORK/create"
+    run_in "$WORK/create" create feature 6 local-clone-invocation
+    assert_status "create exits 0" 0 "$RUN_STATUS"
+    assert_branch "create leaves branch dev/6-local-clone-invocation" \
+        "dev/6-local-clone-invocation"
+    _version="$(cd "$WORK/create" && ./scripts/issue-branch status 2>/dev/null | sed -n 's/^Current version: //p')"
+    assert_eq "create commits PEP 440 dev version" \
+        "1.4.0.dev1+issue-6-local-clone-invocation" "$_version"
+}
+
+test_create_rejects_invalid_type() {
+    make_project "$WORK/create-badtype"
+    run_in "$WORK/create-badtype" create banana 6 local-clone-invocation
+    assert_status "invalid type exits 1" 1 "$RUN_STATUS"
+    assert_branch "invalid type creates no branch" "main"
+}
+
+test_create_rejects_non_numeric_issue() {
+    make_project "$WORK/create-badissue"
+    run_in "$WORK/create-badissue" create feature six local-clone-invocation
+    assert_status "non-numeric issue exits 1" 1 "$RUN_STATUS"
+    assert_branch "non-numeric issue creates no branch" "main"
+}
+
+test_create_rejects_existing_branch() {
+    make_project "$WORK/create-dup"
+    run_in "$WORK/create-dup" create feature 6 local-clone-invocation
+    run_in "$WORK/create-dup" create feature 6 local-clone-invocation
+    assert_status "duplicate branch exits 1" 1 "$RUN_STATUS"
+}
+
+test_create_rejects_dirty_tree() {
+    make_project "$WORK/create-dirty"
+    (cd "$WORK/create-dirty" && echo "dirty" >> sample/__about__.py)
+    run_in "$WORK/create-dirty" create feature 7 dirty-tree
+    assert_status "dirty tree exits 1" 1 "$RUN_STATUS"
+    assert_branch "dirty tree creates no branch" "main"
+}
+
+test_create_requires_base_branch() {
+    make_project "$WORK/create-offbase"
+    (cd "$WORK/create-offbase" && git checkout -qb dev/99-other)
+    run_in "$WORK/create-offbase" create feature 8 off-base
+    assert_status "create outside base exits 1" 1 "$RUN_STATUS"
+    assert_branch "create outside base leaves branch untouched" "dev/99-other"
+}
+
+# ---------------------------------------------------------------------------
+# resume
+# ---------------------------------------------------------------------------
+
+test_resume_checks_out_existing_branch() {
+    make_project "$WORK/resume"
+    run_in "$WORK/resume" create feature 6 local-clone-invocation
+    (cd "$WORK/resume" && git checkout -q main)
+    run_in "$WORK/resume" resume feature 6 local-clone-invocation
+    assert_status "resume exits 0" 0 "$RUN_STATUS"
+    assert_branch "resume checks out branch" "dev/6-local-clone-invocation"
+}
+
+test_resume_bumps_dev_version() {
+    make_project "$WORK/resume-version"
+    run_in "$WORK/resume-version" create feature 6 local-clone-invocation
+    (cd "$WORK/resume-version" && git checkout -q main)
+    run_in "$WORK/resume-version" resume fix 6 local-clone-invocation
+    assert_status "resume bump exits 0" 0 "$RUN_STATUS"
+    assert_version "resume writes patch dev version" "$WORK/resume-version" \
+        "1.3.1.dev1+issue-6-local-clone-invocation"
+}
+
+test_resume_rejects_missing_branch() {
+    make_project "$WORK/resume-missing"
+    run_in "$WORK/resume-missing" resume feature 6 local-clone-invocation
+    assert_status "missing branch exits 1" 1 "$RUN_STATUS"
+    assert_branch "missing branch stays on main" "main"
+}
+
+# ---------------------------------------------------------------------------
+# bump-version
+# ---------------------------------------------------------------------------
+
+test_bump_version_rejects_base_branch() {
+    make_project "$WORK/bump-base"
+    run_in "$WORK/bump-base" bump-version --minor
+    assert_status "bump on main exits 1" 1 "$RUN_STATUS"
+}
+
+test_bump_version_recomputes_from_branch_type() {
+    make_project "$WORK/bump"
+    run_in "$WORK/bump" create feature 6 local-clone-invocation
+    (cd "$WORK/bump" && git checkout -q main && git checkout -qb dev/7-patch-work)
+    run_in "$WORK/bump" bump-version --patch
+    assert_status "bump exits 0" 0 "$RUN_STATUS"
+    assert_version "bump writes patch dev version" "$WORK/bump" \
+        "1.3.1.dev1+issue-7-patch-work"
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+test_status_is_non_mutating() {
+    make_project "$WORK/status"
+    run_in "$WORK/status" create feature 6 local-clone-invocation
+    _before_head="$(cd "$WORK/status" && git rev-parse HEAD)"
+    _before_version="$(current_version_of "$WORK/status")"
+    _before_changelog="$(cd "$WORK/status" && git rev-parse HEAD:CHANGELOG.md)"
+    _before_tags="$(cd "$WORK/status" && git tag -l | tr '\n' ' ')"
+    run_in "$WORK/status" status
+    assert_status "status exits 0" 0 "$RUN_STATUS"
+    assert_eq "status does not move HEAD" "$_before_head" \
+        "$(cd "$WORK/status" && git rev-parse HEAD)"
+    assert_eq "status does not change version" "$_before_version" \
+        "$(current_version_of "$WORK/status")"
+    assert_eq "status does not change changelog" "$_before_changelog" \
+        "$(cd "$WORK/status" && git rev-parse HEAD:CHANGELOG.md)"
+    assert_eq "status does not change tags" "$_before_tags" \
+        "$(cd "$WORK/status" && git tag -l | tr '\n' ' ')"
+    assert_branch "status stays on issue branch" "dev/6-local-clone-invocation"
+}
+
+# ---------------------------------------------------------------------------
+# changelog promotion
+# ---------------------------------------------------------------------------
+
+test_finish_promotes_changelog_and_tags() {
+    make_project "$WORK/finish"
+    run_in "$WORK/finish" create feature 6 local-clone-invocation
+    (cd "$WORK/finish" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish" finish
+    assert_status "finish exits 0" 0 "$RUN_STATUS"
+    assert_branch "finish returns to base branch" "main"
+    assert_contains "finish promotes unreleased heading" \
+        "## [1.4.0] - 2026-" "$(sed -n '1,40p' "$WORK/finish/CHANGELOG.md")"
+    assert_contains "finish re-adds unreleased section" \
+        "## [Unreleased]" "$(sed -n '1,40p' "$WORK/finish/CHANGELOG.md")"
+    assert_contains "finish creates release tag" "v1.4.0" \
+        "$(cd "$WORK/finish" && git tag -l)"
+    assert_annotated_tag "finish tag is annotated" "$WORK/finish" "v1.4.0"
+    _final="$(current_version_of "$WORK/finish")"
+    assert_eq "finish writes final version" "1.4.0" "$_final"
+}
+
+test_finish_merge_message_closes_issue() {
+    make_project "$WORK/finish-msg"
+    run_in "$WORK/finish-msg" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-msg" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish-msg" finish
+    assert_status "finish exits 0" 0 "$RUN_STATUS"
+    _subject="$(cd "$WORK/finish-msg" && git log -1 --pretty=%s main)"
+    assert_contains "finish merge message closes issue" "closes #6" "$_subject"
+}
+
+test_finish_rejects_missing_changelog() {
+    make_project "$WORK/finish-nochangelog"
+    (cd "$WORK/finish-nochangelog" && git rm -q CHANGELOG.md && git commit -qm "drop changelog")
+    run_in "$WORK/finish-nochangelog" create feature 6 local-clone-invocation
+    run_in "$WORK/finish-nochangelog" finish
+    assert_status "missing changelog exits 1" 1 "$RUN_STATUS"
+    assert_branch "missing changelog stays on branch" "dev/6-local-clone-invocation"
+}
+
+test_finish_warns_on_untracked_files() {
+    make_project "$WORK/finish-untracked"
+    run_in "$WORK/finish-untracked" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-untracked" && echo "- more" >> CHANGELOG.md && \
+        git add -A && git commit -qm "work" && echo scratch > notes.txt)
+    run_in "$WORK/finish-untracked" finish
+    assert_status "untracked file aborts without confirmation" 1 "$RUN_STATUS"
+    assert_contains "untracked file is named" "notes.txt" "$(cd "$WORK/finish-untracked" && git status --porcelain)"
+}
+
+test_finish_skip_changelog_leaves_changelog_alone() {
+    make_project "$WORK/finish-skipchangelog"
+    run_in "$WORK/finish-skipchangelog" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-skipchangelog" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    _before="$(cd "$WORK/finish-skipchangelog" && git show dev/6-local-clone-invocation:CHANGELOG.md | sha256sum)"
+    run_in "$WORK/finish-skipchangelog" finish --skip-changelog
+    assert_status "finish --skip-changelog exits 0" 0 "$RUN_STATUS"
+    _after="$(cd "$WORK/finish-skipchangelog" && git show main:CHANGELOG.md | sha256sum)"
+    assert_eq "finish --skip-changelog preserves content" "$_before" "$_after"
+}
+
+test_finish_recovery_tags_existing_merge() {
+    make_project "$WORK/finish-recovery"
+    run_in "$WORK/finish-recovery" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-recovery" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish-recovery" finish
+    (cd "$WORK/finish-recovery" && git tag -d v1.4.0 >/dev/null)
+    _head_before="$(cd "$WORK/finish-recovery" && git rev-parse HEAD)"
+    _merge_count_before="$(cd "$WORK/finish-recovery" && git rev-list --merges --count HEAD)"
+    run_in "$WORK/finish-recovery" finish
+    assert_status "recovery finish exits 0" 0 "$RUN_STATUS"
+    assert_contains "recovery (re)creates tag" "v1.4.0" \
+        "$(cd "$WORK/finish-recovery" && git tag -l)"
+    assert_eq "recovery creates no additional merge" "$_merge_count_before" \
+        "$(cd "$WORK/finish-recovery" && git rev-list --merges --count HEAD)"
+    assert_eq "recovery does not move base HEAD" "$_head_before" \
+        "$(cd "$WORK/finish-recovery" && git rev-parse HEAD)"
+}
+
+test_finish_rejects_empty_unreleased() {
+    make_project "$WORK/finish-empty"
+    run_in "$WORK/finish-empty" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-empty" && \
+        printf '# Changelog\n\n## [Unreleased]\n\n## [1.3.0] - 2026-09-17\n\n- old\n' > CHANGELOG.md && \
+        git add -A && git commit -qm "empty unreleased")
+    run_in "$WORK/finish-empty" finish
+    assert_status "empty unreleased exits 1" 1 "$RUN_STATUS"
+    assert_branch "empty unreleased leaves issue branch" "dev/6-local-clone-invocation"
+}
+
+test_finish_rejects_dirty_tree() {
+    make_project "$WORK/finish-dirty"
+    run_in "$WORK/finish-dirty" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-dirty" && echo "dirty" >> README.md)
+    run_in "$WORK/finish-dirty" finish
+    assert_status "finish with dirty tree exits 1" 1 "$RUN_STATUS"
+    assert_branch "finish with dirty tree stays on branch" "dev/6-local-clone-invocation"
+}
+
+test_finish_skips_tests_when_told() {
+    make_project "$WORK/finish-skiptests"
+    cat > "$WORK/finish-skiptests/scripts/run-tests.sh" <<'EOF'
+#!/bin/sh
+echo "FAILED" >&2
+exit 1
+EOF
+    chmod +x "$WORK/finish-skiptests/scripts/run-tests.sh"
+    (cd "$WORK/finish-skiptests" && git add -A && git commit -qm "failing tests")
+    run_in "$WORK/finish-skiptests" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-skiptests" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish-skiptests" finish --skip-tests
+    assert_status "finish --skip-tests exits 0" 0 "$RUN_STATUS"
+}
+
+test_finish_fails_when_tests_fail() {
+    make_project "$WORK/finish-testsfail"
+    cat > "$WORK/finish-testsfail/scripts/run-tests.sh" <<'EOF'
+#!/bin/sh
+echo "FAILED" >&2
+exit 1
+EOF
+    chmod +x "$WORK/finish-testsfail/scripts/run-tests.sh"
+    (cd "$WORK/finish-testsfail" && git add -A && git commit -qm "failing tests")
+    run_in "$WORK/finish-testsfail" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-testsfail" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish-testsfail" finish
+    assert_status "finish with failing tests exits 2" 2 "$RUN_STATUS"
+    assert_branch "finish with failing tests stays on branch" "dev/6-local-clone-invocation"
+}
+
+# ---------------------------------------------------------------------------
+# release (direct on base branch)
+# ---------------------------------------------------------------------------
+
+test_release_bumps_and_tags() {
+    make_project "$WORK/release"
+    run_in "$WORK/release" release --minor --skip-tests
+    assert_status "release exits 0" 0 "$RUN_STATUS"
+    assert_version "release bumps minor version" "$WORK/release" "1.4.0"
+    assert_contains "release promotes unreleased heading" \
+        "## [1.4.0] - 2026-" "$(sed -n '1,40p' "$WORK/release/CHANGELOG.md")"
+    assert_contains "release creates tag" "v1.4.0" \
+        "$(cd "$WORK/release" && git tag -l)"
+    assert_annotated_tag "release tag is annotated" "$WORK/release" "v1.4.0"
+}
+
+test_release_no_bump_tags_current_version() {
+    make_project "$WORK/release-nobump"
+    run_in "$WORK/release-nobump" release --no-bump --skip-tests
+    assert_status "release --no-bump exits 0" 0 "$RUN_STATUS"
+    assert_version "release --no-bump keeps version" "$WORK/release-nobump" "1.3.0"
+    assert_contains "release --no-bump tags current" "v1.3.0" \
+        "$(cd "$WORK/release-nobump" && git tag -l)"
+}
+
+test_release_rejects_dirty_tree() {
+    make_project "$WORK/release-dirty"
+    (cd "$WORK/release-dirty" && echo "dirty" >> README.md)
+    run_in "$WORK/release-dirty" release --patch --skip-tests
+    assert_status "release with dirty tree exits 1" 1 "$RUN_STATUS"
+}
+
+test_release_rejects_untracked_files() {
+    make_project "$WORK/release-untracked"
+    (cd "$WORK/release-untracked" && echo scratch > notes.txt)
+    run_in "$WORK/release-untracked" release --patch --skip-tests
+    assert_status "release with untracked files exits 1" 1 "$RUN_STATUS"
+    assert_absent_tag "release aborts before tagging" "$WORK/release-untracked" "v1.3.1"
+}
+
+test_release_rejects_empty_unreleased() {
+    make_project "$WORK/release-empty"
+    (cd "$WORK/release-empty" && \
+        printf '# Changelog\n\n## [Unreleased]\n\n## [1.3.0] - 2026-09-17\n\n- old\n' > CHANGELOG.md && \
+        git add -A && git commit -qm "empty unreleased")
+    run_in "$WORK/release-empty" release --patch --skip-tests
+    assert_status "release with empty unreleased exits 1" 1 "$RUN_STATUS"
+}
+
+test_release_rejects_issue_branch() {
+    make_project "$WORK/release-branch"
+    run_in "$WORK/release-branch" create feature 6 local-clone-invocation
+    run_in "$WORK/release-branch" release --patch --skip-tests
+    assert_status "release on issue branch exits 1" 1 "$RUN_STATUS"
+}
+
+# ---------------------------------------------------------------------------
+# no remote behavior
+# ---------------------------------------------------------------------------
+
+test_no_push_on_finish_or_release() {
+    make_project "$WORK/noremote"
+    run_in "$WORK/noremote" create feature 6 local-clone-invocation
+    assert_eq "create does not push" "" "$(cd "$WORK/noremote" && git remote)"
+    (cd "$WORK/noremote" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/noremote" finish
+    assert_eq "finish does not add remote" "" "$(cd "$WORK/noremote" && git remote)"
+}
+
+# ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+run_test test_create_uses_project_template_and_commits_dev_version
+run_test test_create_rejects_invalid_type
+run_test test_create_rejects_non_numeric_issue
+run_test test_create_rejects_existing_branch
+run_test test_create_rejects_dirty_tree
+run_test test_create_requires_base_branch
+run_test test_resume_checks_out_existing_branch
+run_test test_resume_bumps_dev_version
+run_test test_resume_rejects_missing_branch
+run_test test_bump_version_rejects_base_branch
+run_test test_bump_version_recomputes_from_branch_type
+run_test test_status_is_non_mutating
+run_test test_finish_promotes_changelog_and_tags
+run_test test_finish_merge_message_closes_issue
+run_test test_finish_rejects_missing_changelog
+run_test test_finish_warns_on_untracked_files
+run_test test_finish_skip_changelog_leaves_changelog_alone
+run_test test_finish_recovery_tags_existing_merge
+run_test test_finish_rejects_empty_unreleased
+run_test test_finish_rejects_dirty_tree
+run_test test_finish_skips_tests_when_told
+run_test test_finish_fails_when_tests_fail
+run_test test_release_bumps_and_tags
+run_test test_release_no_bump_tags_current_version
+run_test test_release_rejects_dirty_tree
+run_test test_release_rejects_untracked_files
+run_test test_release_rejects_empty_unreleased
+run_test test_release_rejects_issue_branch
+run_test test_no_push_on_finish_or_release
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+if [ "$FAIL" -gt 0 ]; then
+    printf 'Failed tests:%s\n' "$FAILED_NAMES"
+    exit 1
+fi
+exit 0

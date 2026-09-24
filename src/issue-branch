@@ -1,0 +1,535 @@
+#!/bin/sh
+#
+# issue-branch: manage the issue-branch lifecycle for a Python project.
+#
+# Commands:
+#   create <type> <issue-number> <short-slug>
+#   resume <type> <issue-number> <short-slug>
+#   status
+#   bump-version [--major|--minor|--patch]
+#   finish [--skip-tests] [--skip-changelog]
+#   release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+#
+# Operates on the current project. Project-specific behavior comes from
+# project_settings.sh next to this script:
+#
+#   ISSUE_BRANCH_TEMPLATE     branch name template (default "dev/{issue}-{slug}")
+#   ISSUE_BRANCH_BASE         base branch (default "main")
+#   ISSUE_BRANCH_TEST_COMMAND test command (required for finish/release)
+#   ISSUE_BRANCH_CHANGELOG    changelog path (default "CHANGELOG.md")
+#
+# Never pushes and never creates a GitHub release; those stay manual.
+#
+# Variable naming: sourced helpers in functions.sh use bare private names
+# (_branch, _version, _pkg, _name, _ref, _expected_branch). All locals here
+# use an ib_ prefix so calling a helper cannot clobber them.
+
+DIRNAME="$(dirname "$0")"
+
+# utility functions
+. "$DIRNAME"/functions.sh
+
+# ---------------------------------------------------------------------------
+# configuration
+# ---------------------------------------------------------------------------
+
+VALID_TYPES="feature fix docs refactor test chore"
+
+if [ -z "$ISSUE_BRANCH_TEMPLATE" ]; then
+    ISSUE_BRANCH_TEMPLATE="dev/{issue}-{slug}"
+fi
+if [ -z "$ISSUE_BRANCH_BASE" ]; then
+    ISSUE_BRANCH_BASE="main"
+fi
+if [ -z "$ISSUE_BRANCH_CHANGELOG" ]; then
+    ISSUE_BRANCH_CHANGELOG="CHANGELOG.md"
+fi
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+# package_directory -> prints the package dir holding __about__.py
+package_directory() {
+    ib_pkg="$ROOT_PACKAGE_NAME"
+    if [ -z "$ib_pkg" ]; then
+        ib_pkg="$(project_name | tr '-' '_')"
+    fi
+    printf '%s' "$ib_pkg"
+    unset ib_pkg
+}
+
+# about_file -> prints the path to the package's __about__.py
+about_file() {
+    printf '%s/__about__.py' "$(package_directory)"
+}
+
+# today -> prints YYYY-MM-DD
+today() {
+    date +%Y-%m-%d
+}
+
+# valid_type <type>
+valid_type() {
+    case " $VALID_TYPES " in
+        *" $1 "*) return $SUCCESS ;;
+        *) return $FAILURE ;;
+    esac
+}
+
+# build_branch <issue> <slug>
+build_branch() {
+    ib_name="$ISSUE_BRANCH_TEMPLATE"
+    ib_name="$(printf '%s' "$ib_name" | sed "s/{issue}/$1/")"
+    ib_name="$(printf '%s' "$ib_name" | sed "s/{slug}/$2/")"
+    printf '%s' "$ib_name"
+    unset ib_name
+}
+
+# branch_issue <branch> -> prints issue number, or empty when not an issue branch
+branch_issue() {
+    ib_name="$1"
+    ib_pat="$(printf '%s' "$ISSUE_BRANCH_TEMPLATE" | sed 's/[][\\.*^$/]/\\&/g')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{issue}/\([0-9][0-9]*\)/')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{slug}.*$/.*/')"
+    printf '%s' "$ib_name" | sed -n "s/^${ib_pat}\$/\1/p"
+    unset ib_name ib_pat
+}
+
+# bump_level <type> -> prints major|minor|patch
+bump_level() {
+    case "$1" in
+        feature) printf 'minor' ;;
+        *) printf 'patch' ;;
+    esac
+}
+
+# bump_core <version> <level> -> prints the bumped X.Y.Z (drops dev suffix)
+bump_core() {
+    ib_ver="$1"
+    ib_level="$2"
+    ib_core="$(printf '%s' "$ib_ver" | sed 's/\.dev[0-9][0-9]*.*$//')"
+    ib_major="$(printf '%s' "$ib_core" | cut -d. -f1)"
+    ib_minor="$(printf '%s' "$ib_core" | cut -d. -f2)"
+    ib_patch="$(printf '%s' "$ib_core" | cut -d. -f3)"
+    case "$ib_level" in
+        major) ib_major=$((ib_major + 1)); ib_minor=0; ib_patch=0 ;;
+        minor) ib_minor=$((ib_minor + 1)); ib_patch=0 ;;
+        patch) ib_patch=$((ib_patch + 1)) ;;
+    esac
+    printf '%s.%s.%s' "$ib_major" "$ib_minor" "$ib_patch"
+    unset ib_ver ib_level ib_core ib_major ib_minor ib_patch
+}
+
+# core_version <version> -> prints version with any dev/local suffix removed
+core_version() {
+    printf '%s' "$1" | sed 's/\.dev[0-9][0-9]*.*$//'
+}
+
+# dev_version <core> <branch> -> prints PEP 440 dev version
+dev_version() {
+    printf '%s.dev1+issue-%s' "$1" "$2"
+}
+
+# write_version <version>
+write_version() {
+    ib_file="$(about_file)"
+    if [ ! -f "$ib_file" ]; then
+        quit "No '$ib_file' found to write version" 1
+    fi
+    printf '__version__ = "%s"\n' "$1" > "$ib_file"
+    unset ib_file
+}
+
+# commit_paths <message> <path...>
+commit_paths() {
+    ib_message="$1"
+    shift
+    git add "$@" || quit "Failed to stage changes" 1
+    git commit -m "$ib_message" "$@" >/dev/null || quit "Failed to commit: $ib_message" 1
+    unset ib_message
+}
+
+# require_clean_tree
+require_clean_tree() {
+    if ! branch_is_clean; then
+        echo "Tree contains uncommitted modifications:"
+        git ls-files -m
+        quit 1
+    fi
+    ib_untracked="$(git ls-files --others --exclude-standard)"
+    if [ -n "$ib_untracked" ]; then
+        echo "Tree contains untracked files:"
+        printf '%s\n' "$ib_untracked"
+        quit 1
+    fi
+    unset ib_untracked
+}
+
+# require_base_branch
+require_base_branch() {
+    if ! branch_is "$ISSUE_BRANCH_BASE"; then
+        ib_cur="$(git_current_branch)"
+        quit "Must be on $ISSUE_BRANCH_BASE to run this command. Currently on $ib_cur." 1
+    fi
+}
+
+# require_issue_branch -> sets ISSUE_NUMBER from the current branch
+require_issue_branch() {
+    ib_cur="$(git_current_branch)"
+    ISSUE_NUMBER="$(branch_issue "$ib_cur")"
+    if [ -z "$ISSUE_NUMBER" ]; then
+        quit "Not on an issue branch (expected $ISSUE_BRANCH_TEMPLATE). Currently on $ib_cur." 1
+    fi
+    unset ib_cur
+}
+
+# promote_changelog <version>
+promote_changelog() {
+    ib_file="$ISSUE_BRANCH_CHANGELOG"
+    ib_pver="$1"
+    if [ ! -f "$ib_file" ]; then
+        quit "No '$ib_file' found to promote" 1
+    fi
+
+    # Find the [Unreleased] heading, then its content up to the next "## [".
+    ib_body="$(awk '
+        /^## \[Unreleased\]/ { in_unreleased = 1; next }
+        in_unreleased && /^## \[/ { exit }
+        in_unreleased { print }
+    ' "$ib_file")"
+
+    # Content is non-empty only when a non-blank line exists.
+    ib_content="$(printf '%s\n' "$ib_body" | sed '/^[[:space:]]*$/d')"
+    if [ -z "$ib_content" ]; then
+        quit "No content under [Unreleased] in $ib_file to promote" 1
+    fi
+
+    ib_new="${TMPDIR:-/tmp}/issue-branch-changelog.$$"
+    awk -v version="$ib_pver" -v date="$(today)" '
+        /^## \[Unreleased\]/ {
+            print "## [Unreleased]"
+            print ""
+            print "## [" version "] - " date
+            in_unreleased = 1
+            next
+        }
+        { print }
+    ' "$ib_file" > "$ib_new" || quit "Failed to rewrite $ib_file" 1
+    mv "$ib_new" "$ib_file" || quit "Failed to replace $ib_file" 1
+
+    unset ib_file ib_pver ib_body ib_content ib_new
+}
+
+# run_project_tests
+run_project_tests() {
+    if [ -z "$ISSUE_BRANCH_TEST_COMMAND" ]; then
+        quit "ISSUE_BRANCH_TEST_COMMAND is not configured" 1
+    fi
+    sh -c "$ISSUE_BRANCH_TEST_COMMAND" || quit "Project tests failed" 2
+}
+
+# tag_release <version>
+tag_release() {
+    ib_pver="$1"
+    if version_is_tagged "$ib_pver"; then
+        echo "Version $ib_pver already tagged."
+        unset ib_pver
+        return $SUCCESS
+    fi
+    git tag "v$ib_pver" -m "version $ib_pver" || quit "Failed to tag v$ib_pver" 1
+    echo "Tagged v$ib_pver"
+    unset ib_pver
+}
+
+# stage_version_and_changelog <skip_changelog>
+stage_version_and_changelog() {
+    ib_file="$(about_file)"
+    if [ -f "$ib_file" ]; then
+        git add "$ib_file" || quit "Failed to stage version file" 1
+    fi
+    if [ "$1" -eq 0 ] && [ -f "$ISSUE_BRANCH_CHANGELOG" ]; then
+        git add "$ISSUE_BRANCH_CHANGELOG" || quit "Failed to stage changelog" 1
+    fi
+    unset ib_file
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<EOF
+Usage: issue-branch <command> [options]
+
+Commands:
+  create <type> <issue-number> <short-slug>
+  resume <type> <issue-number> <short-slug>
+  status
+  bump-version [--major|--minor|--patch]
+  finish [--skip-tests] [--skip-changelog]
+  release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+
+Types: $VALID_TYPES
+EOF
+}
+
+cmd_create() {
+    ib_type="$1"
+    ib_issue="$2"
+    ib_slug="$3"
+
+    if [ -z "$ib_type" ] || [ -z "$ib_issue" ] || [ -z "$ib_slug" ]; then
+        usage
+        quit 1
+    fi
+    if ! valid_type "$ib_type"; then
+        quit "Invalid type: $ib_type (valid: $VALID_TYPES)" 1
+    fi
+    case "$ib_issue" in
+        *[!0-9]*) quit "Issue number must be numeric: $ib_issue" 1 ;;
+    esac
+
+    ib_new="$(build_branch "$ib_issue" "$ib_slug")"
+
+    require_base_branch
+    require_clean_tree
+
+    if git show-ref --verify --quiet "refs/heads/$ib_new"; then
+        quit "Branch already exists: $ib_new" 1
+    fi
+
+    git checkout -b "$ib_new" >/dev/null 2>&1 || quit "Failed to create branch $ib_new" 1
+
+    ib_level="$(bump_level "$ib_type")"
+    ib_core="$(bump_core "$(current_version)" "$ib_level")"
+    ib_dev="$(dev_version "$ib_core" "$ib_new")"
+    write_version "$ib_dev"
+    commit_paths "bump version to $ib_dev" "$(about_file)"
+
+    echo "Created $ib_new with version $ib_dev"
+    unset ib_type ib_issue ib_slug ib_new ib_level ib_core ib_dev
+}
+
+cmd_resume() {
+    ib_type="$1"
+    ib_issue="$2"
+    ib_slug="$3"
+
+    if [ -z "$ib_type" ] || [ -z "$ib_issue" ] || [ -z "$ib_slug" ]; then
+        usage
+        quit 1
+    fi
+    if ! valid_type "$ib_type"; then
+        quit "Invalid type: $ib_type (valid: $VALID_TYPES)" 1
+    fi
+
+    ib_new="$(build_branch "$ib_issue" "$ib_slug")"
+
+    require_base_branch
+    require_clean_tree
+
+    if ! git show-ref --verify --quiet "refs/heads/$ib_new"; then
+        quit "Branch does not exist: $ib_new" 1
+    fi
+
+    git checkout "$ib_new" >/dev/null 2>&1 || quit "Failed to check out $ib_new" 1
+
+    ib_level="$(bump_level "$ib_type")"
+    ib_core="$(bump_core "$(current_version)" "$ib_level")"
+    ib_dev="$(dev_version "$ib_core" "$ib_new")"
+    write_version "$ib_dev"
+    commit_paths "bump version to $ib_dev" "$(about_file)"
+
+    echo "Resumed $ib_new with version $ib_dev"
+    unset ib_type ib_issue ib_slug ib_new ib_level ib_core ib_dev
+}
+
+cmd_status() {
+    require_issue_branch
+    ib_ver="$(current_version)"
+    echo "Branch: $(git_current_branch)"
+    echo "Issue: $ISSUE_NUMBER"
+    echo "Current version: $ib_ver"
+    echo "Release version: $(core_version "$ib_ver")"
+    if branch_is_clean; then
+        echo "Tracked changes: none"
+    else
+        echo "Tracked changes:"
+        git ls-files -m
+    fi
+    ib_untracked="$(git ls-files --others --exclude-standard)"
+    if [ -n "$ib_untracked" ]; then
+        echo "Untracked files:"
+        printf '%s\n' "$ib_untracked"
+    fi
+    unset ib_ver ib_untracked
+}
+
+cmd_bump_version() {
+    ib_level=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --major) ib_level="major" ;;
+            --minor) ib_level="minor" ;;
+            --patch) ib_level="patch" ;;
+            *) quit "Unknown option: $1" 1 ;;
+        esac
+        shift
+    done
+
+    if branch_is "$ISSUE_BRANCH_BASE"; then
+        quit "bump-version must run on an issue branch, not $ISSUE_BRANCH_BASE" 1
+    fi
+
+    ib_cur="$(git_current_branch)"
+    if [ -z "$(branch_issue "$ib_cur")" ]; then
+        quit "bump-version must run on an issue branch. Currently on $ib_cur." 1
+    fi
+
+    require_clean_tree
+
+    if [ -z "$ib_level" ]; then
+        ib_level="patch"
+    fi
+    ib_core="$(bump_core "$(current_version)" "$ib_level")"
+    ib_dev="$(dev_version "$ib_core" "$ib_cur")"
+    write_version "$ib_dev"
+    commit_paths "bump version to $ib_dev" "$(about_file)"
+    echo "Bumped to $ib_dev"
+    unset ib_level ib_cur ib_core ib_dev
+}
+
+cmd_finish() {
+    ib_skip_tests=0
+    ib_skip_changelog=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --skip-tests) ib_skip_tests=1 ;;
+            --skip-changelog) ib_skip_changelog=1 ;;
+            *) quit "Unknown option: $1" 1 ;;
+        esac
+        shift
+    done
+
+    ib_cur="$(git_current_branch)"
+    ib_issue="$(branch_issue "$ib_cur")"
+
+    if [ "$ib_cur" = "$ISSUE_BRANCH_BASE" ]; then
+        # Post-merge recovery: only when the latest commit closes an issue.
+        ib_subject="$(git log -1 --pretty=%s)"
+        ib_issue="$(printf '%s' "$ib_subject" | sed -n 's/.*closes #\([0-9][0-9]*\).*/\1/p')"
+        if [ -z "$ib_issue" ]; then
+            quit "On $ISSUE_BRANCH_BASE but no closable merge found; nothing to do" 1
+        fi
+        ib_ver="$(current_version)"
+        ib_core="$(core_version "$ib_ver")"
+        if version_is_tagged "$ib_core"; then
+            echo "Release already tagged for $ib_ver."
+            quit 0
+        fi
+        echo "Recovering tag for $ib_core"
+        tag_release "$ib_core"
+        quit 0
+    fi
+
+    if [ -z "$ib_issue" ]; then
+        quit "Not on an issue branch (expected $ISSUE_BRANCH_TEMPLATE). Currently on $ib_cur." 1
+    fi
+
+    require_clean_tree
+
+    if [ "$ib_skip_tests" -eq 0 ]; then
+        run_project_tests
+    fi
+
+    ib_ver="$(current_version)"
+    ib_core="$(core_version "$ib_ver")"
+
+    if [ "$ib_skip_changelog" -eq 0 ]; then
+        promote_changelog "$ib_core"
+    fi
+
+    # Rebase onto base.
+    git rebase "$ISSUE_BRANCH_BASE" >/dev/null 2>&1 || quit "Failed to rebase onto $ISSUE_BRANCH_BASE" 1
+
+    write_version "$ib_core"
+    stage_version_and_changelog "$ib_skip_changelog"
+    git commit -m "release $ib_core" >/dev/null || quit "Failed to commit release changes" 1
+
+    git checkout "$ISSUE_BRANCH_BASE" >/dev/null 2>&1 || quit "Failed to check out $ISSUE_BRANCH_BASE" 1
+    git merge --no-ff "$ib_cur" -m "Merge $ib_cur (closes #$ib_issue)" \
+        || quit "Failed to merge $ib_cur" 1
+    tag_release "$ib_core"
+
+    echo "Finished $ib_cur as $ib_core"
+    unset ib_skip_tests ib_skip_changelog ib_cur ib_issue ib_subject ib_ver ib_core
+}
+
+cmd_release() {
+    ib_level=""
+    ib_no_bump=0
+    ib_skip_tests=0
+    ib_skip_changelog=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --major) ib_level="major" ;;
+            --minor) ib_level="minor" ;;
+            --patch) ib_level="patch" ;;
+            --no-bump) ib_no_bump=1 ;;
+            --skip-tests) ib_skip_tests=1 ;;
+            --skip-changelog) ib_skip_changelog=1 ;;
+            *) quit "Unknown option: $1" 1 ;;
+        esac
+        shift
+    done
+
+    require_base_branch
+    require_clean_tree
+
+    if [ "$ib_skip_tests" -eq 0 ]; then
+        run_project_tests
+    fi
+
+    ib_current="$(current_version)"
+    if [ "$ib_no_bump" -eq 1 ]; then
+        ib_final="$(core_version "$ib_current")"
+    else
+        if [ -z "$ib_level" ]; then
+            ib_level="patch"
+        fi
+        ib_final="$(bump_core "$ib_current" "$ib_level")"
+        write_version "$ib_final"
+    fi
+
+    if [ "$ib_skip_changelog" -eq 0 ]; then
+        promote_changelog "$ib_final"
+    fi
+
+    stage_version_and_changelog "$ib_skip_changelog"
+    git commit -m "release $ib_final" >/dev/null || quit "Failed to commit release changes" 1
+    tag_release "$ib_final"
+
+    echo "Released $ib_final"
+    unset ib_level ib_no_bump ib_skip_tests ib_skip_changelog ib_current ib_final
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+command="$1"
+if [ $# -gt 0 ]; then
+    shift
+fi
+
+case "$command" in
+    create) cmd_create "$@" ;;
+    resume) cmd_resume "$@" ;;
+    status) cmd_status "$@" ;;
+    bump-version) cmd_bump_version "$@" ;;
+    finish) cmd_finish "$@" ;;
+    release) cmd_release "$@" ;;
+    ''|-h|--help|help) usage; quit 0 ;;
+    *) usage; quit "Unknown command: $command" 1 ;;
+esac

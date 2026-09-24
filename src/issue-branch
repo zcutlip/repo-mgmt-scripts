@@ -72,8 +72,8 @@ today() {
 # valid_type <type>
 valid_type() {
     case " $VALID_TYPES " in
-        *" $1 "*) return $SUCCESS ;;
-        *) return $FAILURE ;;
+        *" $1 "*) return "$SUCCESS" ;;
+        *) return "$FAILURE" ;;
     esac
 }
 
@@ -90,8 +90,18 @@ build_branch() {
 branch_issue() {
     ib_name="$1"
     ib_pat="$(printf '%s' "$ISSUE_BRANCH_TEMPLATE" | sed 's/[][\\.*^$/]/\\&/g')"
-    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{issue}/\([0-9][0-9]*\)/')"
-    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{slug}.*$/.*/')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{issue}/\\([0-9][0-9]*\\)/')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{slug}/.*/')"
+    printf '%s' "$ib_name" | sed -n "s/^${ib_pat}\$/\1/p"
+    unset ib_name ib_pat
+}
+
+# branch_slug <branch> -> prints slug, or empty when not an issue branch
+branch_slug() {
+    ib_name="$1"
+    ib_pat="$(printf '%s' "$ISSUE_BRANCH_TEMPLATE" | sed 's/[][\\.*^$/]/\\&/g')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{issue}/[0-9][0-9]*/')"
+    ib_pat="$(printf '%s' "$ib_pat" | sed 's/{slug}/\\(.*\\)/')"
     printf '%s' "$ib_name" | sed -n "s/^${ib_pat}\$/\1/p"
     unset ib_name ib_pat
 }
@@ -126,9 +136,9 @@ core_version() {
     printf '%s' "$1" | sed 's/\.dev[0-9][0-9]*.*$//'
 }
 
-# dev_version <core> <branch> -> prints PEP 440 dev version
+# dev_version <core> <issue> <slug> -> prints PEP 440 dev version
 dev_version() {
-    printf '%s.dev1+issue-%s' "$1" "$2"
+    printf '%s.dev1+issue-%s-%s' "$1" "$2" "$3"
 }
 
 # write_version <version>
@@ -174,11 +184,11 @@ require_base_branch() {
     fi
 }
 
-# require_issue_branch -> sets ISSUE_NUMBER from the current branch
+# require_issue_branch -> sets ib_issue_number from the current branch
 require_issue_branch() {
     ib_cur="$(git_current_branch)"
-    ISSUE_NUMBER="$(branch_issue "$ib_cur")"
-    if [ -z "$ISSUE_NUMBER" ]; then
+    ib_issue_number="$(branch_issue "$ib_cur")"
+    if [ -z "$ib_issue_number" ]; then
         quit "Not on an issue branch (expected $ISSUE_BRANCH_TEMPLATE). Currently on $ib_cur." 1
     fi
     unset ib_cur
@@ -235,7 +245,7 @@ tag_release() {
     if version_is_tagged "$ib_pver"; then
         echo "Version $ib_pver already tagged."
         unset ib_pver
-        return $SUCCESS
+        return "$SUCCESS"
     fi
     git tag "v$ib_pver" -m "version $ib_pver" || quit "Failed to tag v$ib_pver" 1
     echo "Tagged v$ib_pver"
@@ -302,13 +312,13 @@ cmd_create() {
     git checkout -b "$ib_new" >/dev/null 2>&1 || quit "Failed to create branch $ib_new" 1
 
     ib_level="$(bump_level "$ib_type")"
-    ib_core="$(bump_core "$(current_version)" "$ib_level")"
-    ib_dev="$(dev_version "$ib_core" "$ib_new")"
+    ib_base="$(bump_core "$(current_version)" "$ib_level")"
+    ib_dev="$(dev_version "$ib_base" "$ib_issue" "$ib_slug")"
     write_version "$ib_dev"
     commit_paths "bump version to $ib_dev" "$(about_file)"
 
     echo "Created $ib_new with version $ib_dev"
-    unset ib_type ib_issue ib_slug ib_new ib_level ib_core ib_dev
+    unset ib_type ib_issue ib_slug ib_new ib_level ib_base ib_dev
 }
 
 cmd_resume() {
@@ -336,20 +346,27 @@ cmd_resume() {
     git checkout "$ib_new" >/dev/null 2>&1 || quit "Failed to check out $ib_new" 1
 
     ib_level="$(bump_level "$ib_type")"
-    ib_core="$(bump_core "$(current_version)" "$ib_level")"
-    ib_dev="$(dev_version "$ib_core" "$ib_new")"
-    write_version "$ib_dev"
-    commit_paths "bump version to $ib_dev" "$(about_file)"
+    ib_base_ver="$(git show "$ISSUE_BRANCH_BASE:$(about_file)" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
+    if [ -z "$ib_base_ver" ]; then
+        quit "Unable to read version from $ISSUE_BRANCH_BASE" 1
+    fi
+    ib_base="$(bump_core "$ib_base_ver" "$ib_level")"
+    ib_dev="$(dev_version "$ib_base" "$ib_issue" "$ib_slug")"
+    ib_current_ver="$(current_version)"
+    if [ "$ib_current_ver" != "$ib_dev" ]; then
+        write_version "$ib_dev"
+        commit_paths "bump version to $ib_dev" "$(about_file)"
+    fi
 
     echo "Resumed $ib_new with version $ib_dev"
-    unset ib_type ib_issue ib_slug ib_new ib_level ib_core ib_dev
+    unset ib_type ib_issue ib_slug ib_new ib_level ib_base_ver ib_base ib_dev ib_current_ver
 }
 
 cmd_status() {
     require_issue_branch
     ib_ver="$(current_version)"
     echo "Branch: $(git_current_branch)"
-    echo "Issue: $ISSUE_NUMBER"
+    echo "Issue: $ib_issue_number"
     echo "Current version: $ib_ver"
     echo "Release version: $(core_version "$ib_ver")"
     if branch_is_clean; then
@@ -363,7 +380,7 @@ cmd_status() {
         echo "Untracked files:"
         printf '%s\n' "$ib_untracked"
     fi
-    unset ib_ver ib_untracked
+    unset ib_ver ib_untracked ib_issue_number
 }
 
 cmd_bump_version() {
@@ -393,11 +410,13 @@ cmd_bump_version() {
         ib_level="patch"
     fi
     ib_core="$(bump_core "$(current_version)" "$ib_level")"
-    ib_dev="$(dev_version "$ib_core" "$ib_cur")"
+    ib_bump_issue="$(branch_issue "$ib_cur")"
+    ib_bump_slug="$(branch_slug "$ib_cur")"
+    ib_dev="$(dev_version "$ib_core" "$ib_bump_issue" "$ib_bump_slug")"
     write_version "$ib_dev"
     commit_paths "bump version to $ib_dev" "$(about_file)"
     echo "Bumped to $ib_dev"
-    unset ib_level ib_cur ib_core ib_dev
+    unset ib_level ib_cur ib_core ib_bump_issue ib_bump_slug ib_dev
 }
 
 cmd_finish() {
@@ -518,12 +537,12 @@ cmd_release() {
 # dispatch
 # ---------------------------------------------------------------------------
 
-command="$1"
+ib_command="$1"
 if [ $# -gt 0 ]; then
     shift
 fi
 
-case "$command" in
+case "$ib_command" in
     create) cmd_create "$@" ;;
     resume) cmd_resume "$@" ;;
     status) cmd_status "$@" ;;
@@ -531,5 +550,5 @@ case "$command" in
     finish) cmd_finish "$@" ;;
     release) cmd_release "$@" ;;
     ''|-h|--help|help) usage; quit 0 ;;
-    *) usage; quit "Unknown command: $command" 1 ;;
+    *) usage; quit "Unknown command: $ib_command" 1 ;;
 esac

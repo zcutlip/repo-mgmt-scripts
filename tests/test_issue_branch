@@ -67,6 +67,16 @@ assert_contains() {
     esac
 }
 
+assert_not_contains() {
+    _name="$1"
+    _needle="$2"
+    _haystack="$3"
+    case "$_haystack" in
+        *"$_needle"*) fail "$_name" "expected output to omit '$_needle'; got: $_haystack" ;;
+        *) pass ;;
+    esac
+}
+
 # assert_branch <name> <dir> <expected>
 assert_branch() {
     _name="$1"
@@ -214,9 +224,11 @@ fi
 #
 # Returns immediately when the command under test is absent, recording an
 # explicit failure for the test instead of running it against a missing
-# executable.
+# executable. Prints one progress line per test so a slow run is visibly
+# advancing; this changes output only, not assertions.
 run_test() {
     _fn="$1"
+    printf 'RUN %s\n' "$_fn"
     if [ "$COMMAND_PRESENT" -eq 0 ]; then
         fail "$_fn" "src/issue-branch is missing; contract cannot be exercised"
         return
@@ -316,7 +328,17 @@ test_bump_version_rejects_base_branch() {
     assert_status "bump on main exits 1" 1 "$RUN_STATUS"
 }
 
-test_bump_version_recomputes_from_branch_type() {
+test_bump_version_requires_explicit_level() {
+    make_project "$WORK/bump-default"
+    run_in "$WORK/bump-default" create feature 6 local-clone-invocation
+    _before="$(current_version_of "$WORK/bump-default")"
+    run_in "$WORK/bump-default" bump-version
+    assert_status "bump without level exits 1" 1 "$RUN_STATUS"
+    assert_eq "bump without level leaves version untouched" "$_before" \
+        "$(current_version_of "$WORK/bump-default")"
+}
+
+test_bump_version_uses_explicit_level() {
     make_project "$WORK/bump"
     run_in "$WORK/bump" create feature 6 local-clone-invocation
     (cd "$WORK/bump" && git checkout -q main && git checkout -qb dev/7-patch-work)
@@ -339,6 +361,12 @@ test_status_is_non_mutating() {
     _before_tags="$(cd "$WORK/status" && git tag -l | tr '\n' ' ')"
     run_in "$WORK/status" status
     assert_status "status exits 0" 0 "$RUN_STATUS"
+    assert_contains "status reports branch" "Branch: dev/6-local-clone-invocation" "$RUN_OUT"
+    assert_contains "status reports issue" "Issue: 6" "$RUN_OUT"
+    assert_contains "status reports current version" "Current version:" "$RUN_OUT"
+    assert_contains "status reports release version" "Release version:" "$RUN_OUT"
+    assert_contains "status reports test command" "Test command:" "$RUN_OUT"
+    assert_contains "status reports changelog readiness" "Changelog:" "$RUN_OUT"
     assert_eq "status does not move HEAD" "$_before_head" \
         "$(cd "$WORK/status" && git rev-parse HEAD)"
     assert_eq "status does not change version" "$_before_version" \
@@ -391,14 +419,16 @@ test_finish_rejects_missing_changelog() {
     assert_branch "missing changelog stays on branch" "$WORK/finish-nochangelog" "dev/6-local-clone-invocation"
 }
 
-test_finish_warns_on_untracked_files() {
+test_finish_rejects_untracked_files() {
     make_project "$WORK/finish-untracked"
     run_in "$WORK/finish-untracked" create feature 6 local-clone-invocation
     (cd "$WORK/finish-untracked" && echo "- more" >> CHANGELOG.md && \
         git add -A && git commit -qm "work" && echo scratch > notes.txt)
     run_in "$WORK/finish-untracked" finish
     assert_status "untracked file aborts without confirmation" 1 "$RUN_STATUS"
-    assert_contains "untracked file is named" "notes.txt" "$(cd "$WORK/finish-untracked" && git status --porcelain)"
+    assert_contains "finish names the untracked file" "notes.txt" "$RUN_OUT"
+    assert_branch "untracked file leaves issue branch" "$WORK/finish-untracked" \
+        "dev/6-local-clone-invocation"
 }
 
 test_finish_skip_changelog_leaves_changelog_alone() {
@@ -428,6 +458,43 @@ test_finish_recovery_tags_existing_merge() {
         "$(cd "$WORK/finish-recovery" && git rev-list --merges --count HEAD)"
     assert_eq "recovery does not move base HEAD" "$_head_before" \
         "$(cd "$WORK/finish-recovery" && git rev-parse HEAD)"
+}
+
+test_finish_recovery_converts_dev_version_before_tagging() {
+    make_project "$WORK/finish-recovery-dev"
+    run_in "$WORK/finish-recovery-dev" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-recovery-dev" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/finish-recovery-dev" finish
+    assert_status "finish exits 0" 0 "$RUN_STATUS"
+    (cd "$WORK/finish-recovery-dev" && git tag -d v1.4.0 >/dev/null && \
+        printf '__version__ = "1.4.0.dev1+issue-6-local-clone-invocation"\n' > sample/__about__.py && \
+        git add sample/__about__.py && git commit -qm "restore dev version")
+    run_in "$WORK/finish-recovery-dev" finish
+    assert_status "dev recovery exits 0" 0 "$RUN_STATUS"
+    assert_version "dev recovery writes release core" "$WORK/finish-recovery-dev" "1.4.0"
+    assert_contains "dev recovery creates tag" "v1.4.0" \
+        "$(cd "$WORK/finish-recovery-dev" && git tag -l)"
+}
+
+test_finish_rebases_before_changelog_promotion() {
+    make_project "$WORK/finish-rebase-order"
+    run_in "$WORK/finish-rebase-order" create feature 6 local-clone-invocation
+    (cd "$WORK/finish-rebase-order" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    (cd "$WORK/finish-rebase-order" && git checkout -q main && \
+        awk '/^## \[Unreleased\]/{print; print ""; print "- base note."; next} {print}' CHANGELOG.md > CHANGELOG.md.new && \
+        mv CHANGELOG.md.new CHANGELOG.md && git add CHANGELOG.md && git commit -qm "base changelog note" && \
+        git checkout -q dev/6-local-clone-invocation)
+    run_in "$WORK/finish-rebase-order" finish
+    assert_status "finish with advanced base exits 0" 0 "$RUN_STATUS"
+    assert_branch "finish with advanced base returns to base" "$WORK/finish-rebase-order" "main"
+    assert_contains "finish promotes against latest base" \
+        "## [1.4.0] - 2026-" "$(sed -n '1,40p' "$WORK/finish-rebase-order/CHANGELOG.md")"
+    _promoted="$(awk '/^## \[1\.4\.0\]/{in_release=1; next} in_release && /^## \[/{exit} in_release' "$WORK/finish-rebase-order/CHANGELOG.md")"
+    assert_contains "promoted section includes base-branch note" "- base note." "$_promoted"
+    assert_not_contains "merged changelog has no conflict markers" "<<<<<<<" \
+        "$(cat "$WORK/finish-rebase-order/CHANGELOG.md")"
+    assert_contains "finish creates release tag" "v1.4.0" \
+        "$(cd "$WORK/finish-rebase-order" && git tag -l)"
 }
 
 test_finish_rejects_empty_unreleased() {
@@ -564,14 +631,17 @@ run_test test_resume_checks_out_existing_branch
 run_test test_resume_bumps_dev_version
 run_test test_resume_rejects_missing_branch
 run_test test_bump_version_rejects_base_branch
-run_test test_bump_version_recomputes_from_branch_type
+run_test test_bump_version_requires_explicit_level
+run_test test_bump_version_uses_explicit_level
 run_test test_status_is_non_mutating
 run_test test_finish_promotes_changelog_and_tags
 run_test test_finish_merge_message_closes_issue
 run_test test_finish_rejects_missing_changelog
-run_test test_finish_warns_on_untracked_files
+run_test test_finish_rejects_untracked_files
 run_test test_finish_skip_changelog_leaves_changelog_alone
 run_test test_finish_recovery_tags_existing_merge
+run_test test_finish_recovery_converts_dev_version_before_tagging
+run_test test_finish_rebases_before_changelog_promotion
 run_test test_finish_rejects_empty_unreleased
 run_test test_finish_rejects_dirty_tree
 run_test test_finish_skips_tests_when_told

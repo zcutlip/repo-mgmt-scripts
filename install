@@ -28,7 +28,7 @@ echo "script_dir: $script_dir"
 echo "install_dir: $install_dir"
 echo "GNU ln: $LN"
 
-for file in deletebranch functions.sh gc_about gc_changelog release tag read_about_version.py;
+for file in deletebranch functions.sh gc_about gc_changelog issue-branch release tag read_about_version.py;
 do
     "$LN" -r -s "$src_dir/$file" "$install_dir/"
 done

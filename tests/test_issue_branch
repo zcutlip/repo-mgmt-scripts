@@ -186,6 +186,10 @@ EOF
         git init -q -b main
         git config user.email "test@example.com"
         git config user.name "Test"
+        # Disable signing so throwaway repos ignore the developer's global git config.
+        git config commit.gpgsign false
+        git config tag.gpgsign false
+        git config tag.forcesignannotated false
         git add -A
         git commit -qm "initial commit"
     )

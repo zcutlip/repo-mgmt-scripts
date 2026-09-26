@@ -468,7 +468,7 @@ test_finish_recovery_converts_dev_version_before_tagging() {
     assert_status "finish exits 0" 0 "$RUN_STATUS"
     (cd "$WORK/finish-recovery-dev" && git tag -d v1.4.0 >/dev/null && \
         printf '__version__ = "1.4.0.dev1+issue-6-local-clone-invocation"\n' > sample/__about__.py && \
-        git add sample/__about__.py && git commit -qm "restore dev version")
+        git add sample/__about__.py && git commit --amend --no-edit -q)
     run_in "$WORK/finish-recovery-dev" finish
     assert_status "dev recovery exits 0" 0 "$RUN_STATUS"
     assert_version "dev recovery writes release core" "$WORK/finish-recovery-dev" "1.4.0"

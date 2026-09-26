@@ -276,7 +276,7 @@ Commands:
   create <type> <issue-number> <short-slug>
   resume <type> <issue-number> <short-slug>
   status
-  bump-version [--major|--minor|--patch]
+  bump-version --major|--minor|--patch
   finish [--skip-tests] [--skip-changelog]
   release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
 
@@ -362,6 +362,32 @@ cmd_resume() {
     unset ib_type ib_issue ib_slug ib_new ib_level ib_base_ver ib_base ib_dev ib_current_ver
 }
 
+# changelog_readiness -> prints one Changelog: line without mutating anything
+changelog_readiness() {
+    ib_status_file="$ISSUE_BRANCH_CHANGELOG"
+    if [ ! -f "$ib_status_file" ]; then
+        echo "Changelog: $ib_status_file is missing"
+        unset ib_status_file
+        return "$SUCCESS"
+    fi
+    if ! grep -q '^## \[Unreleased\]' "$ib_status_file"; then
+        echo "Changelog: $ib_status_file has no [Unreleased] section"
+        unset ib_status_file
+        return "$SUCCESS"
+    fi
+    ib_status_body="$(awk '
+        /^## \[Unreleased\]/ { in_unreleased = 1; next }
+        in_unreleased && /^## \[/ { exit }
+        in_unreleased { print }
+    ' "$ib_status_file")"
+    if [ -z "$(printf '%s\n' "$ib_status_body" | sed '/^[[:space:]]*$/d')" ]; then
+        echo "Changelog: $ib_status_file has an empty [Unreleased] section"
+    else
+        echo "Changelog: $ib_status_file [Unreleased] is ready to promote"
+    fi
+    unset ib_status_file ib_status_body
+}
+
 cmd_status() {
     require_issue_branch
     ib_ver="$(current_version)"
@@ -369,6 +395,12 @@ cmd_status() {
     echo "Issue: $ib_issue_number"
     echo "Current version: $ib_ver"
     echo "Release version: $(core_version "$ib_ver")"
+    if [ -n "$ISSUE_BRANCH_TEST_COMMAND" ]; then
+        echo "Test command: $ISSUE_BRANCH_TEST_COMMAND"
+    else
+        echo "Test command: not configured"
+    fi
+    changelog_readiness
     if branch_is_clean; then
         echo "Tracked changes: none"
     else
@@ -385,6 +417,7 @@ cmd_status() {
 
 cmd_bump_version() {
     ib_level=""
+    ib_level_count=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --major) ib_level="major" ;;
@@ -392,8 +425,12 @@ cmd_bump_version() {
             --patch) ib_level="patch" ;;
             *) quit "Unknown option: $1" 1 ;;
         esac
+        ib_level_count=$((ib_level_count + 1))
         shift
     done
+    if [ "$ib_level_count" -ne 1 ]; then
+        quit "bump-version requires exactly one of --major, --minor, or --patch" 1
+    fi
 
     if branch_is "$ISSUE_BRANCH_BASE"; then
         quit "bump-version must run on an issue branch, not $ISSUE_BRANCH_BASE" 1
@@ -406,9 +443,6 @@ cmd_bump_version() {
 
     require_clean_tree
 
-    if [ -z "$ib_level" ]; then
-        ib_level="patch"
-    fi
     ib_core="$(bump_core "$(current_version)" "$ib_level")"
     ib_bump_issue="$(branch_issue "$ib_cur")"
     ib_bump_slug="$(branch_slug "$ib_cur")"
@@ -416,7 +450,7 @@ cmd_bump_version() {
     write_version "$ib_dev"
     commit_paths "bump version to $ib_dev" "$(about_file)"
     echo "Bumped to $ib_dev"
-    unset ib_level ib_cur ib_core ib_bump_issue ib_bump_slug ib_dev
+    unset ib_level ib_level_count ib_cur ib_core ib_bump_issue ib_bump_slug ib_dev
 }
 
 cmd_finish() {
@@ -447,7 +481,13 @@ cmd_finish() {
             echo "Release already tagged for $ib_ver."
             quit 0
         fi
-        echo "Recovering tag for $ib_core"
+        if [ "$ib_ver" != "$ib_core" ]; then
+            echo "Recovering release version $ib_core"
+            write_version "$ib_core"
+            commit_paths "release $ib_core" "$(about_file)"
+        else
+            echo "Recovering tag for $ib_core"
+        fi
         tag_release "$ib_core"
         quit 0
     fi
@@ -462,15 +502,18 @@ cmd_finish() {
         run_project_tests
     fi
 
+    # Rebase onto the base branch while the tree is still clean, before
+    # promotion dirties it. Pin autostash off so a rebase conflict fails
+    # loudly instead of stashing promotion changes and exiting 0.
+    git -c rebase.autostash=false rebase "$ISSUE_BRANCH_BASE" >/dev/null 2>&1 \
+        || quit "Failed to rebase onto $ISSUE_BRANCH_BASE" 1
+
     ib_ver="$(current_version)"
     ib_core="$(core_version "$ib_ver")"
 
     if [ "$ib_skip_changelog" -eq 0 ]; then
         promote_changelog "$ib_core"
     fi
-
-    # Rebase onto base.
-    git rebase "$ISSUE_BRANCH_BASE" >/dev/null 2>&1 || quit "Failed to rebase onto $ISSUE_BRANCH_BASE" 1
 
     write_version "$ib_core"
     stage_version_and_changelog "$ib_skip_changelog"

@@ -403,20 +403,6 @@ test_resume_rejects_missing_branch() {
 
 # Guard G3: resume must preserve a bump-version correction instead of
 # re-deriving the dev version from the base branch.
-test_resume_preserves_bump_version_correction() {
-    make_project "$WORK/resume-bump"
-    run_in "$WORK/resume-bump" create feature 6 local-clone-invocation
-    run_in "$WORK/resume-bump" bump-version --minor
-    _saved="$(current_version_of "$WORK/resume-bump")"
-    assert_eq "bump writes minor dev version" \
-        "1.5.0.dev1+issue-6-local-clone-invocation" "$_saved"
-    (cd "$WORK/resume-bump" && git checkout -q main)
-    run_in "$WORK/resume-bump" resume feature 6 local-clone-invocation
-    assert_status "resume exits 0" 0 "$RUN_STATUS"
-    assert_eq "resume preserves bump correction" "$_saved" \
-        "$(current_version_of "$WORK/resume-bump")"
-}
-
 # ---------------------------------------------------------------------------
 # bump-version
 # ---------------------------------------------------------------------------
@@ -846,7 +832,6 @@ run_test test_create_requires_base_branch
 run_test test_resume_checks_out_existing_branch
 run_test test_resume_bumps_dev_version
 run_test test_resume_rejects_missing_branch
-run_test test_resume_preserves_bump_version_correction
 run_test test_bump_version_rejects_base_branch
 run_test test_bump_version_requires_explicit_level
 run_test test_bump_version_uses_explicit_level

@@ -8,7 +8,7 @@
 #   status
 #   bump-version [--major|--minor|--patch]
 #   finish [--skip-tests] [--skip-changelog]
-#   release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+#   release [--skip-tests] [--skip-changelog]
 #
 # Operates on the current project. Project-specific behavior comes from
 # project_settings.sh next to this script:
@@ -134,6 +134,16 @@ bump_core() {
 # core_version <version> -> prints version with any dev/local suffix removed
 core_version() {
     printf '%s' "$1" | sed 's/\.dev[0-9][0-9]*.*$//'
+}
+
+# version_is_development <version> -> succeeds when the version carries a
+# development or local suffix (e.g. 1.4.0.dev0, 1.4.0.dev1+issue-6-slug).
+# core_version strips such suffixes, so it cannot be used to detect them.
+version_is_development() {
+    case "$1" in
+        *.dev*|*+*) return "$SUCCESS" ;;
+        *) return "$FAILURE" ;;
+    esac
 }
 
 # dev_version <core> <issue> <slug> -> prints PEP 440 dev version
@@ -278,7 +288,7 @@ Commands:
   status
   bump-version --major|--minor|--patch
   finish [--skip-tests] [--skip-changelog]
-  release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+  release [--skip-tests] [--skip-changelog]
 
 Types: $VALID_TYPES
 EOF
@@ -529,16 +539,10 @@ cmd_finish() {
 }
 
 cmd_release() {
-    ib_level=""
-    ib_no_bump=0
     ib_skip_tests=0
     ib_skip_changelog=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --major) ib_level="major" ;;
-            --minor) ib_level="minor" ;;
-            --patch) ib_level="patch" ;;
-            --no-bump) ib_no_bump=1 ;;
             --skip-tests) ib_skip_tests=1 ;;
             --skip-changelog) ib_skip_changelog=1 ;;
             *) quit "Unknown option: $1" 1 ;;
@@ -549,19 +553,24 @@ cmd_release() {
     require_base_branch
     require_clean_tree
 
-    if [ "$ib_skip_tests" -eq 0 ]; then
-        run_project_tests
+    ib_current="$(current_version)"
+
+    # release never mutates the version, so a development or local suffix means
+    # this version is not in a releasable state.
+    if version_is_development "$ib_current"; then
+        quit "Version $ib_current is a development version; run 'finish' on the issue branch, or 'bump-version' to re-level it" 1
     fi
 
-    ib_current="$(current_version)"
-    if [ "$ib_no_bump" -eq 1 ]; then
-        ib_final="$(core_version "$ib_current")"
-    else
-        if [ -z "$ib_level" ]; then
-            ib_level="patch"
-        fi
-        ib_final="$(bump_core "$ib_current" "$ib_level")"
-        write_version "$ib_final"
+    # Refuse an already-released version instead of promoting a duplicate
+    # changelog heading and then reporting success from tag_release.
+    if version_is_tagged "$ib_current"; then
+        quit "Version $ib_current is already tagged; bump the version in $(about_file) before releasing" 1
+    fi
+
+    ib_final="$ib_current"
+
+    if [ "$ib_skip_tests" -eq 0 ]; then
+        run_project_tests
     fi
 
     if [ "$ib_skip_changelog" -eq 0 ]; then
@@ -573,7 +582,7 @@ cmd_release() {
     tag_release "$ib_final"
 
     echo "Released $ib_final"
-    unset ib_level ib_no_bump ib_skip_tests ib_skip_changelog ib_current ib_final
+    unset ib_skip_tests ib_skip_changelog ib_current ib_final
 }
 
 # ---------------------------------------------------------------------------

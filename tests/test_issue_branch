@@ -162,6 +162,21 @@ assert_count() {
     unset _name _expected _text _actual
 }
 
+# assert_exists <name> <path>
+#
+# Fails when a file the test depends on is absent. Without this, a missing
+# script makes the invocation exit nonzero, which reads as a pass.
+assert_exists() {
+    _name="$1"
+    _path="$2"
+    if [ -f "$_path" ]; then
+        pass
+    else
+        fail "$_name" "expected '$_path' to exist"
+    fi
+    unset _name _path
+}
+
 current_version_of() {
     sed -n 's/^__version__ = "\(.*\)"/\1/p' "$1/sample/__about__.py"
 }
@@ -220,6 +235,93 @@ EOF
     cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"
     cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"
     cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"
+    cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
+    chmod +x "$_dir/scripts/issue-branch"
+
+    cat > "$_dir/scripts/run-tests.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$_dir/scripts/run-tests.sh"
+
+    cat > "$_dir/scripts/project_settings.sh" <<'EOF'
+ROOT_PACKAGE_NAME="sample"
+ISSUE_BRANCH_TEMPLATE="dev/{issue}-{slug}"
+ISSUE_BRANCH_BASE="main"
+ISSUE_BRANCH_TEST_COMMAND="scripts/run-tests.sh"
+ISSUE_BRANCH_CHANGELOG="CHANGELOG.md"
+TWINE_UPLOAD_ENABLED="0"
+EOF
+
+    (
+        cd "$_dir" || exit 1
+        git init -q -b main
+        git config user.email "test@example.com"
+        git config user.name "Test"
+        # Disable signing so throwaway repos ignore the developer's global git config.
+        git config commit.gpgsign false
+        git config tag.gpgsign false
+        git config tag.forcesignannotated false
+        git add -A
+        git commit -qm "initial commit"
+    )
+    unset _dir _version
+}
+
+# rich_project <dir> [version]
+#
+# Same shape as make_project, but sample/__about__.py carries a docstring,
+# __title__, __version__, __summary__, and __all__ in the PLAIN form
+# (__version__ = "1.3.0"). Plain form is required: assert_version,
+# current_version_of, and the git show assertions match with
+# sed -n 's/^__version__ = "\(.*\)"/\1/p', so an annotated fixture would read
+# as empty and fail for a helper limitation rather than a contract violation.
+rich_project() {
+    _dir="$1"
+    _version="${2:-1.3.0}"
+    mkdir -p "$_dir/sample" "$_dir/scripts"
+
+    cat > "$_dir/pyproject.toml" <<'EOF'
+[project]
+name = "sample-project"
+dynamic = ["version"]
+EOF
+
+    # Plain form only (see above). Version is spliced in; every other line is
+    # fixed so pre/post comparisons are meaningful.
+    {
+        printf '"""Sample package metadata."""\n'
+        printf '\n'
+        printf '__title__ = "sample"\n'
+        printf '__version__ = "%s"\n' "$_version"
+        printf '__summary__ = "A sample project."\n'
+        printf '__all__ = ["__title__", "__summary__", "__version__"]\n'
+    } > "$_dir/sample/__about__.py"
+
+    cat > "$_dir/README.md" <<'EOF'
+# sample project
+EOF
+
+    cat > "$_dir/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+### Added
+
+- Something new.
+
+## [1.3.0] - 2026-09-17
+
+### Added
+
+- Previous release.
+EOF
+
+    cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"
+    cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"
+    cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"
+    cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
     chmod +x "$_dir/scripts/issue-branch"
 
     cat > "$_dir/scripts/run-tests.sh" <<'EOF'
@@ -820,6 +922,240 @@ test_no_push_on_finish_or_release() {
 }
 
 # ---------------------------------------------------------------------------
+# write_version preservation (plan 14)
+# ---------------------------------------------------------------------------
+#
+# write_version must rewrite only the __version__ assignment and leave every
+# other byte alone. The current code truncates the file to a single line, so
+# each preservation assertion below fails against it while the version
+# assertion passes — that split is the contract failure.
+
+test_create_preserves_rich_about() {
+    rich_project "$WORK/rich-create"
+    _before="$(cd "$WORK/rich-create" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    run_in "$WORK/rich-create" create feature 6 rich-preservation
+    assert_status "rich create exits 0" 0 "$RUN_STATUS"
+    assert_version "rich create writes dev version" "$WORK/rich-create" \
+        "1.4.0.dev1+issue-6-rich-preservation"
+    _after="$(cd "$WORK/rich-create" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    assert_eq "rich create preserves non-version lines" "$_before" "$_after"
+    _committed="$(cd "$WORK/rich-create" && git show HEAD:sample/__about__.py)"
+    assert_contains "rich create keeps docstring" '"""Sample package metadata."""' "$_committed"
+    assert_contains "rich create keeps title" '__title__ = "sample"' "$_committed"
+    assert_contains "rich create keeps summary" '__summary__ = "A sample project."' "$_committed"
+    assert_contains "rich create keeps all" '__all__ = ["__title__", "__summary__", "__version__"]' "$_committed"
+    unset _before _after _committed
+}
+
+test_resume_preserves_rich_about() {
+    rich_project "$WORK/rich-resume"
+    # Capture before create: create already truncates, so anything captured
+    # after it would compare empty against empty and pass vacuously.
+    _before="$(cd "$WORK/rich-resume" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    run_in "$WORK/rich-resume" create feature 6 rich-preservation
+    assert_status "rich resume setup create exits 0" 0 "$RUN_STATUS"
+    (cd "$WORK/rich-resume" && git checkout -q main)
+    run_in "$WORK/rich-resume" resume fix 6 rich-preservation
+    assert_status "rich resume exits 0" 0 "$RUN_STATUS"
+    assert_version "rich resume writes patch dev version" "$WORK/rich-resume" \
+        "1.3.1.dev1+issue-6-rich-preservation"
+    _after="$(cd "$WORK/rich-resume" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    assert_eq "rich resume preserves non-version lines" "$_before" "$_after"
+    _committed="$(cd "$WORK/rich-resume" && git show HEAD:sample/__about__.py)"
+    assert_contains "rich resume keeps docstring" '"""Sample package metadata."""' "$_committed"
+    assert_contains "rich resume keeps title" '__title__ = "sample"' "$_committed"
+    assert_contains "rich resume keeps summary" '__summary__ = "A sample project."' "$_committed"
+    assert_contains "rich resume keeps all" '__all__ = ["__title__", "__summary__", "__version__"]' "$_committed"
+    unset _before _after _committed
+}
+
+test_bump_version_preserves_rich_about() {
+    rich_project "$WORK/rich-bump"
+    # Capture before create for the same reason as the resume test above.
+    _before="$(cd "$WORK/rich-bump" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    run_in "$WORK/rich-bump" create feature 6 rich-preservation
+    assert_status "rich bump setup create exits 0" 0 "$RUN_STATUS"
+    run_in "$WORK/rich-bump" bump-version --patch
+    assert_status "rich bump exits 0" 0 "$RUN_STATUS"
+    assert_version "rich bump writes patch dev version" "$WORK/rich-bump" \
+        "1.4.1.dev1+issue-6-rich-preservation"
+    _after="$(cd "$WORK/rich-bump" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    assert_eq "rich bump preserves non-version lines" "$_before" "$_after"
+    _committed="$(cd "$WORK/rich-bump" && git show HEAD:sample/__about__.py)"
+    assert_contains "rich bump keeps docstring" '"""Sample package metadata."""' "$_committed"
+    assert_contains "rich bump keeps title" '__title__ = "sample"' "$_committed"
+    assert_contains "rich bump keeps summary" '__summary__ = "A sample project."' "$_committed"
+    assert_contains "rich bump keeps all" '__all__ = ["__title__", "__summary__", "__version__"]' "$_committed"
+    unset _before _after _committed
+}
+
+test_finish_preserves_rich_about() {
+    rich_project "$WORK/rich-finish"
+    # Capture before create for the same reason as the resume test above.
+    _before="$(cd "$WORK/rich-finish" && git show HEAD:sample/__about__.py | grep -v '^__version__')"
+    run_in "$WORK/rich-finish" create feature 6 rich-preservation
+    assert_status "rich finish setup create exits 0" 0 "$RUN_STATUS"
+    (cd "$WORK/rich-finish" && echo "- more" >> CHANGELOG.md && git add -A && git commit -qm "work")
+    run_in "$WORK/rich-finish" finish
+    assert_status "rich finish exits 0" 0 "$RUN_STATUS"
+    assert_version "rich finish writes final version" "$WORK/rich-finish" "1.4.0"
+    _after="$(cd "$WORK/rich-finish" && git show main:sample/__about__.py | grep -v '^__version__')"
+    assert_eq "rich finish preserves non-version lines" "$_before" "$_after"
+    _committed="$(cd "$WORK/rich-finish" && git show main:sample/__about__.py)"
+    assert_contains "rich finish keeps docstring" '"""Sample package metadata."""' "$_committed"
+    assert_contains "rich finish keeps title" '__title__ = "sample"' "$_committed"
+    assert_contains "rich finish keeps summary" '__summary__ = "A sample project."' "$_committed"
+    assert_contains "rich finish keeps all" '__all__ = ["__title__", "__summary__", "__version__"]' "$_committed"
+    unset _before _after _committed
+}
+
+# Annotated form: __version__: str = "1.3.0" is rewritten in place, keeping the
+# annotation, with no duplicate assignment appended.
+test_write_preserves_annotated_form() {
+    rich_project "$WORK/rich-annotated"
+    (cd "$WORK/rich-annotated" && \
+        printf '"""Sample package metadata."""\n\n__title__ = "sample"\n__version__: str = "1.3.0"\n__summary__ = "A sample project."\n__all__ = ["__title__", "__summary__", "__version__"]\n' > sample/__about__.py && \
+        git add -A && git commit -qm "annotated version")
+    run_in "$WORK/rich-annotated" create feature 6 rich-annotated
+    assert_status "annotated create exits 0" 0 "$RUN_STATUS"
+    _committed="$(cd "$WORK/rich-annotated" && git show HEAD:sample/__about__.py)"
+    assert_contains "annotated form keeps annotation" '__version__: str = "1.4.0.dev1+issue-6-rich-annotated"' "$_committed"
+    assert_contains "annotated form keeps title" '__title__ = "sample"' "$_committed"
+    assert_count "annotated form appends no duplicate" "1" \
+        "$(printf '%s\n' "$_committed" | grep -c '__version__' || true)"
+    unset _committed
+}
+
+# Trailing newline: a file lacking a final newline keeps it that way.
+test_write_preserves_missing_trailing_newline() {
+    rich_project "$WORK/rich-nonl"
+    (cd "$WORK/rich-nonl" && \
+        printf '%s' "$(cat sample/__about__.py)" > sample/__about__.py && \
+        git add -A && git commit -qm "strip trailing newline")
+    _nl_before="$(cd "$WORK/rich-nonl" && tail -c 1 sample/__about__.py | wc -l | tr -d ' ')"
+    assert_eq "newline fixture starts without trailing newline" "0" "$_nl_before"
+    run_in "$WORK/rich-nonl" create feature 6 rich-nonl
+    assert_status "newline create exits 0" 0 "$RUN_STATUS"
+    assert_version "newline create writes dev version" "$WORK/rich-nonl" \
+        "1.4.0.dev1+issue-6-rich-nonl"
+    _nl_after="$(cd "$WORK/rich-nonl" && tail -c 1 sample/__about__.py | wc -l | tr -d ' ')"
+    assert_eq "newline create keeps missing trailing newline" "0" "$_nl_after"
+    unset _nl_before _nl_after
+}
+
+# ---------------------------------------------------------------------------
+# write_about_version.py unit coverage (plan 14)
+# ---------------------------------------------------------------------------
+#
+# The script does not exist yet, so these fail on a missing file. That is an
+# accepted RED shape: disclosed in the report, not hidden among contract
+# failures.
+
+test_write_script_preserves_content() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-preserve"
+    mkdir -p "$_dir"
+    cat > "$_dir/__about__.py" <<'EOF'
+"""Sample package metadata."""
+
+__title__ = "sample"
+__version__ = "1.3.0"
+__summary__ = "A sample project."
+__all__ = ["__title__", "__summary__", "__version__"]
+EOF
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_status "write script exits 0" 0 "$_status"
+    _content="$(cat "$_dir/__about__.py")"
+    assert_contains "write script keeps docstring" '"""Sample package metadata."""' "$_content"
+    assert_contains "write script keeps title" '__title__ = "sample"' "$_content"
+    assert_contains "write script keeps summary" '__summary__ = "A sample project."' "$_content"
+    assert_contains "write script keeps all" '__all__ = ["__title__", "__summary__", "__version__"]' "$_content"
+    assert_contains "write script updates version" '__version__ = "1.4.0"' "$_content"
+    unset _dir _out _status _content
+}
+
+test_write_script_rewrites_plain_form() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-plain"
+    mkdir -p "$_dir"
+    printf '__version__ = "1.3.0"\n' > "$_dir/__about__.py"
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_status "write script plain exits 0" 0 "$_status"
+    assert_eq "write script rewrites plain form" '__version__ = "1.4.0"' "$(cat "$_dir/__about__.py" | tr -d '\n')"
+    assert_count "write script plain writes one assignment" "1" \
+        "$(grep -c '__version__' "$_dir/__about__.py" || true)"
+    unset _dir _out _status
+}
+
+test_write_script_rewrites_annotated_form() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-annotated"
+    mkdir -p "$_dir"
+    printf '__version__: str = "1.3.0"\n' > "$_dir/__about__.py"
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_status "write script annotated exits 0" 0 "$_status"
+    assert_eq "write script rewrites annotated form" '__version__: str = "1.4.0"' "$(cat "$_dir/__about__.py" | tr -d '\n')"
+    assert_count "write script annotated writes one assignment" "1" \
+        "$(grep -c '__version__' "$_dir/__about__.py" || true)"
+    unset _dir _out _status
+}
+
+test_write_script_rejects_missing_assignment() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-missing"
+    mkdir -p "$_dir"
+    cat > "$_dir/__about__.py" <<'EOF'
+"""Sample package metadata."""
+
+__title__ = "sample"
+EOF
+    _before="$(cat "$_dir/__about__.py")"
+    set -x
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_ne "write script rejects missing assignment" "0" "$_status"
+    assert_eq "write script leaves missing-assignment file unchanged" "$_before" "$(cat "$_dir/__about__.py")"
+    set +x
+    unset _dir _before _out _status
+}
+
+test_write_script_rejects_unparseable_file() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-unparseable"
+    mkdir -p "$_dir"
+    printf 'def broken(:\n' > "$_dir/__about__.py"
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_ne "write script rejects unparseable file" "0" "$_status"
+    unset _dir _out _status
+}
+
+# Whole-tree ast.unparse would drop comments and normalise quotes, violating
+# byte preservation. The splice must keep both.
+test_write_script_preserves_comments_and_quoting() {
+    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    _dir="$WORK/write-unit-comments"
+    mkdir -p "$_dir"
+    cat > "$_dir/__about__.py" <<'EOF'
+"""Sample package metadata."""
+# keep this comment
+__title__ = 'sample'
+__version__ = "1.3.0"
+EOF
+    _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
+    _status=$?
+    assert_status "write script comments exits 0" 0 "$_status"
+    _content="$(cat "$_dir/__about__.py")"
+    assert_contains "write script keeps comment" "# keep this comment" "$_content"
+    assert_contains "write script keeps single quotes" "__title__ = 'sample'" "$_content"
+    assert_contains "write script writes double-quoted version" '__version__ = "1.4.0"' "$_content"
+    unset _dir _out _status _content
+}
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -856,6 +1192,18 @@ run_test test_release_rejects_issue_branch
 run_test test_release_rejects_dev_version
 run_test test_release_rejects_already_tagged
 run_test test_no_push_on_finish_or_release
+run_test test_create_preserves_rich_about
+run_test test_resume_preserves_rich_about
+run_test test_bump_version_preserves_rich_about
+run_test test_finish_preserves_rich_about
+run_test test_write_preserves_annotated_form
+run_test test_write_preserves_missing_trailing_newline
+run_test test_write_script_preserves_content
+run_test test_write_script_rewrites_plain_form
+run_test test_write_script_rewrites_annotated_form
+run_test test_write_script_rejects_missing_assignment
+run_test test_write_script_rejects_unparseable_file
+run_test test_write_script_preserves_comments_and_quoting
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

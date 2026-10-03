@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_DIR="$REPO_ROOT/src"
 ISSUE_BRANCH="$SRC_DIR/issue-branch"
+FUNCTIONS_SH="$SRC_DIR/functions.sh"
+READ_ABOUT_VERSION="$SRC_DIR/read_about_version.py"
 
 PASS=0
 FAIL=0
@@ -232,10 +234,24 @@ EOF
 - Previous release.
 EOF
 
-    cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"
-    cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"
-    cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"
-    cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
+    if ! cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"; then
+        fail "fixture copy issue-branch" "cannot copy $SRC_DIR/issue-branch"
+        return 1
+    fi
+    if ! cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"; then
+        fail "fixture copy functions.sh" "cannot copy $SRC_DIR/functions.sh"
+        return 1
+    fi
+    if ! cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"; then
+        fail "fixture copy read_about_version.py" "cannot copy $SRC_DIR/read_about_version.py"
+        return 1
+    fi
+    # write_about_version.py is parked (absent during RED); copy only when
+    # present so its absence is not an unchecked `cp:` failure. Its absence is
+    # the RED signal carried by assert_exists in the unit tests.
+    if [ -f "$SRC_DIR/write_about_version.py" ]; then
+        cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
+    fi
     chmod +x "$_dir/scripts/issue-branch"
 
     cat > "$_dir/scripts/run-tests.sh" <<'EOF'
@@ -318,10 +334,24 @@ EOF
 - Previous release.
 EOF
 
-    cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"
-    cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"
-    cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"
-    cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
+    if ! cp "$SRC_DIR/issue-branch" "$_dir/scripts/issue-branch"; then
+        fail "fixture copy issue-branch" "cannot copy $SRC_DIR/issue-branch"
+        return 1
+    fi
+    if ! cp "$SRC_DIR/functions.sh" "$_dir/scripts/functions.sh"; then
+        fail "fixture copy functions.sh" "cannot copy $SRC_DIR/functions.sh"
+        return 1
+    fi
+    if ! cp "$SRC_DIR/read_about_version.py" "$_dir/scripts/read_about_version.py"; then
+        fail "fixture copy read_about_version.py" "cannot copy $SRC_DIR/read_about_version.py"
+        return 1
+    fi
+    # write_about_version.py is parked (absent during RED); copy only when
+    # present so its absence is not an unchecked `cp:` failure. Its absence is
+    # the RED signal carried by assert_exists in the unit tests.
+    if [ -f "$SRC_DIR/write_about_version.py" ]; then
+        cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
+    fi
     chmod +x "$_dir/scripts/issue-branch"
 
     cat > "$_dir/scripts/run-tests.sh" <<'EOF'
@@ -386,10 +416,21 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # The command under test is the deliverable; when it is absent, every test
 # fails. Report each test independently instead of aborting the run so RED
-# shows the full contract surface.
+# shows the full contract surface. Predicates differ by role: issue-branch is
+# an executed command (`-x`); functions.sh is a sourced library (mode 644 by
+# policy) and read_about_version.py is invoked via python3, so both are guarded
+# with `-f` — an `-x` check would fail at baseline and collapse the run.
 COMMAND_PRESENT=1
 if [ ! -x "$ISSUE_BRANCH" ]; then
     COMMAND_PRESENT=0
+fi
+FUNCTIONS_PRESENT=1
+if [ ! -f "$FUNCTIONS_SH" ]; then
+    FUNCTIONS_PRESENT=0
+fi
+READ_ABOUT_VERSION_PRESENT=1
+if [ ! -f "$READ_ABOUT_VERSION" ]; then
+    READ_ABOUT_VERSION_PRESENT=0
 fi
 
 # run_test <fn>
@@ -403,6 +444,14 @@ run_test() {
     printf 'RUN %s\n' "$_fn"
     if [ "$COMMAND_PRESENT" -eq 0 ]; then
         fail "$_fn" "src/issue-branch is missing; contract cannot be exercised"
+        return
+    fi
+    if [ "$FUNCTIONS_PRESENT" -eq 0 ]; then
+        fail "$_fn" "src/functions.sh is missing; contract cannot be exercised"
+        return
+    fi
+    if [ "$READ_ABOUT_VERSION_PRESENT" -eq 0 ]; then
+        fail "$_fn" "src/read_about_version.py is missing; contract cannot be exercised"
         return
     fi
     "$_fn"
@@ -434,6 +483,7 @@ test_create_rejects_invalid_type() {
     make_project "$WORK/create-badtype"
     run_in "$WORK/create-badtype" create banana 6 local-clone-invocation
     assert_status "invalid type exits 1" 1 "$RUN_STATUS"
+    assert_contains "create names the invalid type" "Invalid type:" "$RUN_OUT"
     assert_branch "invalid type creates no branch" "$WORK/create-badtype" "main"
 }
 
@@ -441,6 +491,7 @@ test_create_rejects_non_numeric_issue() {
     make_project "$WORK/create-badissue"
     run_in "$WORK/create-badissue" create feature six local-clone-invocation
     assert_status "non-numeric issue exits 1" 1 "$RUN_STATUS"
+    assert_contains "create names the non-numeric issue" "Issue number must be numeric:" "$RUN_OUT"
     assert_branch "non-numeric issue creates no branch" "$WORK/create-badissue" "main"
 }
 
@@ -462,6 +513,7 @@ test_create_rejects_dirty_tree() {
     (cd "$WORK/create-dirty" && echo "dirty" >> sample/__about__.py)
     run_in "$WORK/create-dirty" create feature 7 dirty-tree
     assert_status "dirty tree exits 1" 1 "$RUN_STATUS"
+    assert_contains "create names the dirty tree" "Tree contains uncommitted modifications:" "$RUN_OUT"
     assert_branch "dirty tree creates no branch" "$WORK/create-dirty" "main"
 }
 
@@ -470,7 +522,26 @@ test_create_requires_base_branch() {
     (cd "$WORK/create-offbase" && git checkout -qb dev/99-other)
     run_in "$WORK/create-offbase" create feature 8 off-base
     assert_status "create outside base exits 1" 1 "$RUN_STATUS"
+    assert_contains "create names the off-base requirement" "Must be on main to run this command" "$RUN_OUT"
     assert_branch "create outside base leaves branch untouched" "$WORK/create-offbase" "dev/99-other"
+}
+
+test_create_fails_when_version_unreadable() {
+    make_project "$WORK/create-badversion"
+    # Corrupt the version source and COMMIT the corruption. cmd_create runs
+    # require_clean_tree before the version read, so an uncommitted corruption
+    # would abort with "Tree contains uncommitted modifications:" and this test
+    # could never reach the version-read contract.
+    (cd "$WORK/create-badversion" && \
+        printf '__title__ = "sample"\n' > sample/__about__.py && \
+        git add -A && git commit -qm "corrupt version source")
+    run_in "$WORK/create-badversion" create feature 6 unreadable-version
+    assert_status "unreadable version aborts create" 1 "$RUN_STATUS"
+    assert_contains "create reports the unreadable version" \
+        "Unable to read version from" "$RUN_OUT"
+    # Deliberately NO branch assertion, unlike every other rejection test:
+    # cmd_create checks out the new branch before the version read, so at GREEN
+    # the failed create leaves the repo on dev/6-unreadable-version.
 }
 
 # ---------------------------------------------------------------------------
@@ -500,6 +571,7 @@ test_resume_rejects_missing_branch() {
     make_project "$WORK/resume-missing"
     run_in "$WORK/resume-missing" resume feature 6 local-clone-invocation
     assert_status "missing branch exits 1" 1 "$RUN_STATUS"
+    assert_contains "resume names the missing branch" "Branch does not exist:" "$RUN_OUT"
     assert_branch "missing branch stays on main" "$WORK/resume-missing" "main"
 }
 
@@ -513,6 +585,7 @@ test_bump_version_rejects_base_branch() {
     make_project "$WORK/bump-base"
     run_in "$WORK/bump-base" bump-version --minor
     assert_status "bump on main exits 1" 1 "$RUN_STATUS"
+    assert_contains "bump-version names the base branch" "bump-version must run on an issue branch, not main" "$RUN_OUT"
 }
 
 test_bump_version_requires_explicit_level() {
@@ -521,6 +594,7 @@ test_bump_version_requires_explicit_level() {
     _before="$(current_version_of "$WORK/bump-default")"
     run_in "$WORK/bump-default" bump-version
     assert_status "bump without level exits 1" 1 "$RUN_STATUS"
+    assert_contains "bump-version names the missing level" "bump-version requires exactly one of" "$RUN_OUT"
     assert_eq "bump without level leaves version untouched" "$_before" \
         "$(current_version_of "$WORK/bump-default")"
 }
@@ -551,7 +625,8 @@ test_status_is_non_mutating() {
     assert_status "status exits 0" 0 "$RUN_STATUS"
     assert_contains "status reports branch" "Branch: dev/6-local-clone-invocation" "$RUN_OUT"
     assert_contains "status reports issue" "Issue: 6" "$RUN_OUT"
-    assert_contains "status reports current version" "Current version:" "$RUN_OUT"
+    assert_contains "status reports the current version value" \
+        "Current version: 1.4.0.dev1+issue-6-local-clone-invocation" "$RUN_OUT"
     assert_contains "status reports release version" "Release version:" "$RUN_OUT"
     assert_contains "status reports test command" "Test command:" "$RUN_OUT"
     assert_contains "status reports changelog readiness" "Changelog:" "$RUN_OUT"
@@ -774,6 +849,7 @@ test_release_rejects_dirty_tree() {
     (cd "$WORK/release-dirty" && echo "dirty" >> README.md)
     run_in "$WORK/release-dirty" release --skip-tests
     assert_status "release with dirty tree exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the dirty tree" "Tree contains uncommitted modifications:" "$RUN_OUT"
 }
 
 test_release_rejects_untracked_files() {
@@ -781,6 +857,7 @@ test_release_rejects_untracked_files() {
     (cd "$WORK/release-untracked" && echo scratch > notes.txt)
     run_in "$WORK/release-untracked" release --skip-tests
     assert_status "release with untracked files exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the untracked files" "Tree contains untracked files:" "$RUN_OUT"
     # Assert no tag of ANY name: checking a single version would miss the case
     # where the command tags a different version than the one asked about.
     assert_count "release aborts before tagging" "0" \
@@ -801,6 +878,7 @@ test_release_rejects_empty_unreleased() {
     run_in "$WORK/release-empty" release --skip-tests
 
     assert_status "release with empty unreleased exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the empty unreleased section" "No content under [Unreleased]" "$RUN_OUT"
     # Rejecting the empty [Unreleased] must not leave a mutated version behind.
     # The current source writes the version before the changelog check runs.
     assert_version "release does not mutate version before aborting" \
@@ -818,6 +896,7 @@ test_release_rejects_issue_branch() {
     run_in "$WORK/release-branch" create feature 6 local-clone-invocation
     run_in "$WORK/release-branch" release --skip-tests
     assert_status "release on issue branch exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the issue-branch requirement" "Must be on main to run this command" "$RUN_OUT"
 }
 
 # Guard G1: release must reject a dev version instead of mutating it.
@@ -841,6 +920,7 @@ test_release_rejects_dev_version() {
     run_in "$WORK/release-dev" release --skip-tests
 
     assert_status "release with dev version exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the development version" "is a development version" "$RUN_OUT"
     assert_version "release leaves the dev version untouched" \
         "$WORK/release-dev" "1.4.0.dev0"
     assert_eq "release creates no tag at all" "$_before_tags" \
@@ -873,6 +953,7 @@ test_release_rejects_already_tagged() {
     run_in "$WORK/release-tagged" release --skip-tests
 
     assert_status "release with existing tag exits 1" 1 "$RUN_STATUS"
+    assert_contains "release names the existing tag" "is already tagged" "$RUN_OUT"
     assert_version "release leaves the version untouched" \
         "$WORK/release-tagged" "1.3.0"
     assert_eq "release creates no additional tag" "$_before_tags" \
@@ -1113,12 +1194,11 @@ test_write_script_rejects_missing_assignment() {
 __title__ = "sample"
 EOF
     _before="$(cat "$_dir/__about__.py")"
-    set -x
     _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
     _status=$?
     assert_ne "write script rejects missing assignment" "0" "$_status"
     assert_eq "write script leaves missing-assignment file unchanged" "$_before" "$(cat "$_dir/__about__.py")"
-    set +x
+    assert_contains "write script names the missing assignment" "no __version__ assignment found" "$_out"
     unset _dir _before _out _status
 }
 
@@ -1130,6 +1210,7 @@ test_write_script_rejects_unparseable_file() {
     _out="$(python3 "$SRC_DIR/write_about_version.py" "$_dir/__about__.py" "1.4.0" 2>&1)"
     _status=$?
     assert_ne "write script rejects unparseable file" "0" "$_status"
+    assert_contains "write script names the unparseable file" "cannot parse" "$_out"
     unset _dir _out _status
 }
 
@@ -1165,6 +1246,7 @@ run_test test_create_rejects_non_numeric_issue
 run_test test_create_rejects_existing_branch
 run_test test_create_rejects_dirty_tree
 run_test test_create_requires_base_branch
+run_test test_create_fails_when_version_unreadable
 run_test test_resume_checks_out_existing_branch
 run_test test_resume_bumps_dev_version
 run_test test_resume_rejects_missing_branch

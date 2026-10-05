@@ -88,6 +88,12 @@ branch_is_clean(){
 }
 
 current_version() {
+    # Contract: stdout carries the version on success and the error message on
+    # failure; callers must test the status (… || quit "$captured" $?). Failure
+    # must never go through quit: inside a command substitution quit's exit
+    # kills only the subshell, so the caller would continue with an empty
+    # version and a zero status. Instead the error is echoed to stdout and the
+    # function returns nonzero.
     # resolution order:
     # 1. <package>/__about__.py __version__ via stdlib ast (no import, no
     #    setuptools). Package dir is ROOT_PACKAGE_NAME when set, else the
@@ -96,13 +102,25 @@ current_version() {
     _pkg="$ROOT_PACKAGE_NAME"
     if [ -z "$_pkg" ];
     then
-        _pkg="$(project_name | tr '-' '_')" || quit "Can't determine project name" $?
+        _pkg="$(project_name | tr '-' '_')" || {
+            _status=$?
+            echo "Can't determine project name"
+            return "$_status"
+        }
     fi
     if [ -f "$_pkg/__about__.py" ];
     then
-        _version="$(python3 "$DIRNAME/read_about_version.py" "$_pkg/__about__.py")" || quit "Unable to read version from $_pkg/__about__.py" $?
+        _version="$(python3 "$DIRNAME/read_about_version.py" "$_pkg/__about__.py")" || {
+            _status=$?
+            echo "Unable to read version from $_pkg/__about__.py"
+            return "$_status"
+        }
     else
-        _version="$(python3 ./setup.py --version)" || quit "Unable to detect package version" $?
+        _version="$(python3 ./setup.py --version)" || {
+            _status=$?
+            echo "Unable to detect package version"
+            return "$_status"
+        }
     fi
     printf "%s" "$_version"
     unset _pkg _version

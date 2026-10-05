@@ -157,7 +157,8 @@ write_version() {
     if [ ! -f "$ib_file" ]; then
         quit "No '$ib_file' found to write version" 1
     fi
-    printf '__version__ = "%s"\n' "$1" > "$ib_file"
+    python3 "$DIRNAME/write_about_version.py" "$ib_file" "$1" \
+        || quit "Failed to write version to $ib_file" 1
     unset ib_file
 }
 
@@ -322,13 +323,14 @@ cmd_create() {
     git checkout -b "$ib_new" >/dev/null 2>&1 || quit "Failed to create branch $ib_new" 1
 
     ib_level="$(bump_level "$ib_type")"
-    ib_base="$(bump_core "$(current_version)" "$ib_level")"
+    ib_base_ver="$(current_version)" || quit "$ib_base_ver" $?
+    ib_base="$(bump_core "$ib_base_ver" "$ib_level")"
     ib_dev="$(dev_version "$ib_base" "$ib_issue" "$ib_slug")"
     write_version "$ib_dev"
     commit_paths "bump version to $ib_dev" "$(about_file)"
 
     echo "Created $ib_new with version $ib_dev"
-    unset ib_type ib_issue ib_slug ib_new ib_level ib_base ib_dev
+    unset ib_type ib_issue ib_slug ib_new ib_level ib_base_ver ib_base ib_dev
 }
 
 cmd_resume() {
@@ -362,7 +364,7 @@ cmd_resume() {
     fi
     ib_base="$(bump_core "$ib_base_ver" "$ib_level")"
     ib_dev="$(dev_version "$ib_base" "$ib_issue" "$ib_slug")"
-    ib_current_ver="$(current_version)"
+    ib_current_ver="$(current_version)" || quit "$ib_current_ver" $?
     if [ "$ib_current_ver" != "$ib_dev" ]; then
         write_version "$ib_dev"
         commit_paths "bump version to $ib_dev" "$(about_file)"
@@ -400,7 +402,7 @@ changelog_readiness() {
 
 cmd_status() {
     require_issue_branch
-    ib_ver="$(current_version)"
+    ib_ver="$(current_version)" || quit "$ib_ver" $?
     echo "Branch: $(git_current_branch)"
     echo "Issue: $ib_issue_number"
     echo "Current version: $ib_ver"
@@ -453,14 +455,15 @@ cmd_bump_version() {
 
     require_clean_tree
 
-    ib_core="$(bump_core "$(current_version)" "$ib_level")"
+    ib_core_ver="$(current_version)" || quit "$ib_core_ver" $?
+    ib_core="$(bump_core "$ib_core_ver" "$ib_level")"
     ib_bump_issue="$(branch_issue "$ib_cur")"
     ib_bump_slug="$(branch_slug "$ib_cur")"
     ib_dev="$(dev_version "$ib_core" "$ib_bump_issue" "$ib_bump_slug")"
     write_version "$ib_dev"
     commit_paths "bump version to $ib_dev" "$(about_file)"
     echo "Bumped to $ib_dev"
-    unset ib_level ib_level_count ib_cur ib_core ib_bump_issue ib_bump_slug ib_dev
+    unset ib_level ib_level_count ib_cur ib_core_ver ib_core ib_bump_issue ib_bump_slug ib_dev
 }
 
 cmd_finish() {
@@ -485,7 +488,7 @@ cmd_finish() {
         if [ -z "$ib_issue" ]; then
             quit "On $ISSUE_BRANCH_BASE but no closable merge found; nothing to do" 1
         fi
-        ib_ver="$(current_version)"
+        ib_ver="$(current_version)" || quit "$ib_ver" $?
         ib_core="$(core_version "$ib_ver")"
         if version_is_tagged "$ib_core"; then
             echo "Release already tagged for $ib_ver."
@@ -518,7 +521,7 @@ cmd_finish() {
     git -c rebase.autostash=false rebase "$ISSUE_BRANCH_BASE" >/dev/null 2>&1 \
         || quit "Failed to rebase onto $ISSUE_BRANCH_BASE" 1
 
-    ib_ver="$(current_version)"
+    ib_ver="$(current_version)" || quit "$ib_ver" $?
     ib_core="$(core_version "$ib_ver")"
 
     if [ "$ib_skip_changelog" -eq 0 ]; then
@@ -553,7 +556,7 @@ cmd_release() {
     require_base_branch
     require_clean_tree
 
-    ib_current="$(current_version)"
+    ib_current="$(current_version)" || quit "$ib_current" $?
 
     # release never mutates the version, so a development or local suffix means
     # this version is not in a releasable state.

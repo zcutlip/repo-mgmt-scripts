@@ -164,19 +164,25 @@ assert_count() {
     unset _name _expected _text _actual
 }
 
-# assert_exists <name> <path>
+# require_exists <name> <path>
 #
-# Fails when a file the test depends on is absent. Without this, a missing
-# script makes the invocation exit nonzero, which reads as a pass.
-assert_exists() {
+# Precondition guard: fails and returns nonzero when a file the test depends
+# on is absent. Unlike the assert_* helpers this does not record-and-return,
+# nor does it touch the pass counter — a missing dependency is a precondition,
+# not a contract assertion. Callers use `require_exists ... || return` so a
+# missing dependency aborts the test instead of letting its body run and
+# misattribute interpreter noise to contract assertions. Follows run_test's
+# dependency guard (fail + return; the body never runs).
+require_exists() {
     _name="$1"
     _path="$2"
     if [ -f "$_path" ]; then
-        pass
-    else
-        fail "$_name" "expected '$_path' to exist"
+        unset _name _path
+        return 0
     fi
+    fail "$_name" "expected '$_path' to exist"
     unset _name _path
+    return 1
 }
 
 current_version_of() {
@@ -248,7 +254,7 @@ EOF
     fi
     # write_about_version.py is parked (absent during RED); copy only when
     # present so its absence is not an unchecked `cp:` failure. Its absence is
-    # the RED signal carried by assert_exists in the unit tests.
+    # the RED signal carried by require_exists in the unit tests.
     if [ -f "$SRC_DIR/write_about_version.py" ]; then
         cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
     fi
@@ -348,7 +354,7 @@ EOF
     fi
     # write_about_version.py is parked (absent during RED); copy only when
     # present so its absence is not an unchecked `cp:` failure. Its absence is
-    # the RED signal carried by assert_exists in the unit tests.
+    # the RED signal carried by require_exists in the unit tests.
     if [ -f "$SRC_DIR/write_about_version.py" ]; then
         cp "$SRC_DIR/write_about_version.py" "$_dir/scripts/write_about_version.py"
     fi
@@ -1133,7 +1139,7 @@ test_write_preserves_missing_trailing_newline() {
 # failures.
 
 test_write_script_preserves_content() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-preserve"
     mkdir -p "$_dir"
     cat > "$_dir/__about__.py" <<'EOF'
@@ -1157,7 +1163,7 @@ EOF
 }
 
 test_write_script_rewrites_plain_form() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-plain"
     mkdir -p "$_dir"
     printf '__version__ = "1.3.0"\n' > "$_dir/__about__.py"
@@ -1171,7 +1177,7 @@ test_write_script_rewrites_plain_form() {
 }
 
 test_write_script_rewrites_annotated_form() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-annotated"
     mkdir -p "$_dir"
     printf '__version__: str = "1.3.0"\n' > "$_dir/__about__.py"
@@ -1185,7 +1191,7 @@ test_write_script_rewrites_annotated_form() {
 }
 
 test_write_script_rejects_missing_assignment() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-missing"
     mkdir -p "$_dir"
     cat > "$_dir/__about__.py" <<'EOF'
@@ -1203,7 +1209,7 @@ EOF
 }
 
 test_write_script_rejects_unparseable_file() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-unparseable"
     mkdir -p "$_dir"
     printf 'def broken(:\n' > "$_dir/__about__.py"
@@ -1217,7 +1223,7 @@ test_write_script_rejects_unparseable_file() {
 # Whole-tree ast.unparse would drop comments and normalise quotes, violating
 # byte preservation. The splice must keep both.
 test_write_script_preserves_comments_and_quoting() {
-    assert_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py"
+    require_exists "write_about_version.py is present" "$SRC_DIR/write_about_version.py" || return
     _dir="$WORK/write-unit-comments"
     mkdir -p "$_dir"
     cat > "$_dir/__about__.py" <<'EOF'

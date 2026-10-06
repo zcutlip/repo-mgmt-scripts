@@ -21,3 +21,19 @@
 # Either don't set, or set to "1" to enable
 # if set at all and not set to "1" twine upload will not happen
 TWINE_UPLOAD_ENABLED="0"
+
+# branch name template for issue branches; {issue} is the issue number
+# and {slug} is the short slug. Defaults to dev/{issue}-{slug}
+# ISSUE_BRANCH_TEMPLATE="dev/{issue}-{slug}"
+
+# the branch issue branches are created from and finished back into.
+# Defaults to main
+# ISSUE_BRANCH_BASE="main"
+
+# the test command `issue-branch finish` runs to gate the release.
+# Required, no default: finish refuses without it
+# ISSUE_BRANCH_TEST_COMMAND="scripts/run-tests.sh"
+
+# the changelog file whose [Unreleased] section is promoted to a
+# versioned heading at release time. Defaults to CHANGELOG.md
+# ISSUE_BRANCH_CHANGELOG="CHANGELOG.md"

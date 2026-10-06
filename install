@@ -20,6 +20,7 @@ LN="$(get_gnu_ln)"
 if [ -z "$install_dir" ];
 then
     echo "Need an installation destination"
+    exit 1
 fi
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -30,6 +31,16 @@ echo "GNU ln: $LN"
 
 for file in deletebranch functions.sh gc_about gc_changelog issue-branch release tag read_about_version.py write_about_version.py;
 do
-    "$LN" -r -s "$src_dir/$file" "$install_dir/"
+    if [ -f "$install_dir/$file" ] && [ ! -L "$install_dir/$file" ];
+    then
+        echo "Skipping $file: a real file exists at $install_dir/$file"
+        continue
+    fi
+    "$LN" -r -s -f "$src_dir/$file" "$install_dir/"
 done
-cp "$src_dir/example_project_settings.sh" "$install_dir/project_settings.sh"
+if [ -e "$install_dir/project_settings.sh" ];
+then
+    echo "Left existing project_settings.sh untouched; compare with $src_dir/example_project_settings.sh for available settings"
+else
+    cp "$src_dir/example_project_settings.sh" "$install_dir/project_settings.sh"
+fi
